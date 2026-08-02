@@ -54,11 +54,11 @@ function coverCachePath() { return path.join(appDataDirectory(), 'cache'); }
 async function loadSettings() { return { ...defaultLlmSettings, ...await fs.readFile(settingsPath(), 'utf8').then(JSON.parse).catch(() => ({})) }; }
 async function writeDebug(event, data = {}) { const dir = logsPath(); await fs.mkdir(dir, { recursive: true }); await fs.appendFile(path.join(dir, 'activity.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), event, ...data })}\n`, 'utf8'); }
 async function saveSettings(settings) { const safe = { ...defaultLlmSettings, ...settings }; await fs.mkdir(path.dirname(settingsPath()), { recursive: true }); await fs.writeFile(settingsPath(), JSON.stringify(safe, null, 2), 'utf8'); return safe; }
-async function llmRerank(filename, candidates, settingsOverride = null) {
+async function llmRerank(filename, candidates, settingsOverride = null, analysis = null) {
   const settings = settingsOverride || await loadSettings();
   if (!settings.enabled || !settings.apiKey || !candidates.length) return null;
   const endpoint = `${settings.endpoint.replace(/\/$/, '')}/chat/completions`;
-  const text = `你是谨慎的 VRChat BOOTH 素材匹配审核员。先拆分本地文件名中的商品名、版本号、可能的作者/店铺名与类型线索；作者名只能作为消歧上下文，不能单独当作商品匹配证据。比较候选标题、文件名的跨语言/罗马音重合，以及已验证的商品说明内容物命中词；若提供封面图，也检查图中可见标题/物体是否支持判断。若候选带有“本地同族包”线索，它表示另一份共享强标识的本地包已确认该 BOOTH 商品，仍须以标题或内容物证据验证，不能盲从。不要因为候选属于同一大类、或仅出现常见 Avatar 支持名单就选择。标题、内容物命中与文件名均缺少直接证据时，必须拒绝。只返回 JSON：{"tags":["..."],"index":数字或-1,"confidence":0到1,"reason":"简短理由"}。\n文件名：${filename}\n候选：${candidates.map((c, i) => `[${i}] ${c.title}${c.localRelatedName ? `；本地同族包：${c.localRelatedName}` : ''}${c.contentMatches?.length ? `；内容物命中：${c.contentMatches.join(', ')}` : ''}${c.creatorMatches?.length ? `；作者线索命中：${c.creatorMatches.join(', ')}` : ''}`).join('\n')}`;
+  const text = `你是谨慎的 VRChat BOOTH 素材匹配审核员。普通检索已经给出候选，你只能在候选中选择，或返回 -1 表示不确定。作者/店铺、兼容模型、同一大类都只能用于消歧，绝不能单独当作同商品证据；“兼容某模型”不代表素材就是该模型本体或同系列。只有文件商品主体与候选标题、商品内容物或封面可见标题存在直接证据时才可选择。若候选带“本地同族包”，仍须验证标题或内容物，不能盲从。\n文件名：${filename}\n文件名结构（仅作假设，可能错误）：${analysis ? JSON.stringify(analysis) : '未提供'}\n候选：${candidates.map((c, i) => `[${i}] ${c.title}${c.localRelatedName ? `；本地同族包：${c.localRelatedName}` : ''}${c.contentMatches?.length ? `；内容物命中：${c.contentMatches.join(', ')}` : ''}${c.creatorMatches?.length ? `；作者线索命中：${c.creatorMatches.join(', ')}` : ''}`).join('\n')}\n只返回 JSON：{"index":数字或-1,"confidence":0到1,"reason":"简短理由"}。`;
   const content = [{ type: 'text', text }];
   if (settings.useVision) candidates.slice(0, 6).forEach((candidate, index) => { if (candidate.image) content.push({ type: 'text', text: `候选图 ${index}` }, { type: 'image_url', image_url: { url: candidate.image, detail: 'low' } }); });
   try {
@@ -72,21 +72,23 @@ async function llmRerank(filename, candidates, settingsOverride = null) {
     return valid;
   } catch (error) { await writeDebug('llm-error', { filename, message: error.message }); return { index: -1, confidence: 0, reason: `LLM 调用失败：${error.message}` }; }
 }
-async function llmSuggestSearchTerms(filename, tag, settings) {
-  if (!settings.enabled || !settings.apiKey) return { terms: [], creatorHints: [] };
+async function llmAnalyzeFilename(filename, tag, settings, packageClues = {}) {
+  if (!settings.enabled || !settings.apiKey) return { terms: [], creatorHints: [], analysis: null };
   const endpoint = `${settings.endpoint.replace(/\/$/, '')}/chat/completions`;
-  const prompt = `Generate up to 3 concise BOOTH search terms for this local VRChat asset filename. The ordinary filename search produced no reliable match. First identify likely product-name tokens, version tokens, and any possible creator/shop/author token in the filename. Treat an author token as context for disambiguation only: do not return it alone as a search term, and focus terms on the product. Infer likely Japanese terms from English names, likely English/Romaji terms from Japanese names, and likely Japanese or English/Romaji terms from Chinese names. For avatar and character names, include plausible Kanji/Kana ↔ Romaji ↔ product-title combinations when useful: for example, Mafuyu may appear as 真冬, 真冬 Mafuyu, or オリジナル Mafuyu. Prefer distinctive identifiers that could also occur in a BOOTH product's contents list; avoid generic Avatar support names. Preserve proper nouns, use the known tag only as a hint, and do not invent product IDs, shop names, URLs, or generic filler. Return JSON only: {"terms":["..."],"creatorHints":["..."]}.\nFilename: ${filename}\nStructural filename tokens: ${contentTokens(filename).join(', ') || 'none'}\nKnown tag: ${tag || 'none'}`;
+  const prompt = `Analyze one local VRChat asset filename only after ordinary BOOTH search was inconclusive. Separate likely product/series names, possible creator/shop context, possible supported-model names, version markers, and package form. A model name is only a neutral related entity: do not infer “compatibility” or “same product” without explicit words such as for, 対応, addon, extension, patch. An Addon may be an extra package of the same product, not a model-compatible item. Generate at most 3 concise BOOTH search terms centered on the product/series, never a creator alone and never invented IDs, shops or URLs. Infer Japanese/English/Romaji alternatives only when plausible. Return JSON only: {"productTerms":["..."],"seriesTerms":["..."],"creatorHints":["..."],"modelReferences":["..."],"packageKind":"base|addon|compatibility|unknown","relation":"base|same_product_addon|compatibility|unknown","terms":["..."]}.\nFilename: ${filename}\nDeterministic tokens: ${contentTokens(filename).join(', ') || 'none'}\nKnown tag: ${tag || 'none'}\nPackage creator context: ${(packageClues.creatorHints || []).join(', ') || 'none'}\nPackage product-path clues: ${(packageClues.terms || []).join(', ') || 'none'}`;
   try {
     const response = await fetch(endpoint, { method: 'POST', headers: { Authorization: `Bearer ${settings.apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: settings.model, temperature: 0.2, messages: [{ role: 'user', content: prompt }] }) });
     const body = await response.text();
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${body.slice(0, 240)}`);
     const content = JSON.parse(body).choices?.[0]?.message?.content || '';
     const parsed = JSON.parse(content.match(/\{[\s\S]*\}/)?.[0] || '{}');
-    const terms = [...new Set((Array.isArray(parsed.terms) ? parsed.terms : []).map(term => String(term).replace(/[\r\n]+/g, ' ').trim()).filter(term => term.length >= 2 && term.length <= 80))].slice(0, 3);
-    const creatorHints = [...new Set((Array.isArray(parsed.creatorHints) ? parsed.creatorHints : []).map(hint => String(hint).replace(/[\r\n]+/g, ' ').trim()).filter(hint => hint.length >= 2 && hint.length <= 80))].slice(0, 3);
-    await writeDebug('llm-search-aliases', { filename, tag: tag || null, terms, creatorHints });
-    return { terms, creatorHints };
-  } catch (error) { await writeDebug('llm-search-aliases-error', { filename, message: error.message }); return { terms: [], creatorHints: [] }; }
+    const cleanList = (value, limit = 3) => [...new Set((Array.isArray(value) ? value : []).map(item => String(item).replace(/[\r\n]+/g, ' ').trim()).filter(item => item.length >= 2 && item.length <= 80))].slice(0, limit);
+    const analysis = { productTerms: cleanList(parsed.productTerms), seriesTerms: cleanList(parsed.seriesTerms), creatorHints: cleanList(parsed.creatorHints), modelReferences: cleanList(parsed.modelReferences), packageKind: ['base', 'addon', 'compatibility', 'unknown'].includes(parsed.packageKind) ? parsed.packageKind : 'unknown', relation: ['base', 'same_product_addon', 'compatibility', 'unknown'].includes(parsed.relation) ? parsed.relation : 'unknown' };
+    const terms = cleanList(parsed.terms).filter(term => !analysis.creatorHints.some(hint => hint.normalize('NFKC').toLowerCase() === term.normalize('NFKC').toLowerCase()));
+    const creatorHints = analysis.creatorHints;
+    await writeDebug('llm-filename-analysis', { filename, tag: tag || null, terms, analysis });
+    return { terms, creatorHints, analysis };
+  } catch (error) { await writeDebug('llm-filename-analysis-error', { filename, message: error.message }); return { terms: [], creatorHints: [], analysis: null }; }
 }
 function searchTerms(name) {
   const original = name.trim();
@@ -374,6 +376,7 @@ async function boothSearch(query, options = {}) {
     let uncertaintyReason = null;
     const candidatePool = [...relatedBooth.map(item => ({ url: item.itemUrl, title: item.title || item.name, image: null, score: 60, localRelatedName: item.name, matchTerms: ['本地同族包'] })), ...localReferences.map(item => ({ url: item.itemUrl, title: item.title || item.name, image: null, score: 400, localReferenceName: item.name, matchTerms: ['人工本地参考'] }))];
     let creatorHints = [...packageClues.creatorHints];
+    let filenameAnalysis = null;
     for (const [termIndex, term] of (itemUrl ? [] : terms).entries()) {
       const searchUrl = boothSearchUrl(term);
       lastSearchUrl = searchUrl;
@@ -388,8 +391,12 @@ async function boothSearch(query, options = {}) {
       const ranked = candidates.map(candidate => rankSearchCandidate(candidate, term, termIndex, terms.length)).sort((a, b) => b.score - a.score);
       for (const candidate of ranked) mergeSearchCandidate(candidatePool, candidate);
     }
-    if (!itemUrl && !productId) {
-      const llmAliases = llmSettings.enabled ? await llmSuggestSearchTerms(query, options.tag, llmSettings) : { terms: [], creatorHints: [] };
+    candidatePool.sort((left, right) => right.score - left.score);
+    const strongBeforeLlm = hasStrongNormalMatch(candidatePool[0], candidatePool[1]);
+    // 标题已有明确强匹配时不浪费一次 LLM 扩词调用；普通检索结果直接进入内容物校验。
+    if (!itemUrl && !productId && !strongBeforeLlm) {
+      const llmAliases = llmSettings.enabled ? await llmAnalyzeFilename(query, options.tag, llmSettings, packageClues) : { terms: [], creatorHints: [], analysis: null };
+      filenameAnalysis = llmAliases.analysis;
       creatorHints = [...new Set([...creatorHints, ...llmAliases.creatorHints])];
       const aliases = [...knownNameAliases(query), ...llmAliases.terms];
       const extraTerms = aliases.filter(alias => !terms.some(term => term.normalize('NFKC').toLowerCase() === alias.normalize('NFKC').toLowerCase()));
@@ -413,17 +420,18 @@ async function boothSearch(query, options = {}) {
     candidatePool.sort((a, b) => b.score - a.score);
     const evidenceBest = candidatePool[0];
     const evidenceRunnerUp = candidatePool[1];
-    if (!productId && hasStrongNormalMatch(evidenceBest, evidenceRunnerUp)) {
+    const normalStrong = hasStrongNormalMatch(evidenceBest, evidenceRunnerUp);
+    if (!productId && normalStrong) {
       itemUrl = evidenceBest.url;
       matchedTerm = evidenceBest.contentScore >= 120 ? `内容物匹配: ${evidenceBest.contentMatches.join(', ')}` : evidenceBest.matchTerms?.[0] || query;
     }
     const llmQuery = options.tag ? `${query}（已知标签：${options.tag}）` : query;
-    const llmVerdict = !productId && !localConsensus && !trustedReference ? await llmRerank(llmQuery, candidatePool.slice(0, 12), llmSettings) : null;
-    if (llmSettings.enabled && !productId && !localConsensus && !trustedReference) {
+    const llmVerdict = llmSettings.enabled && !normalStrong && !productId && !localConsensus && !trustedReference ? await llmRerank(llmQuery, candidatePool.slice(0, 8), llmSettings, filenameAnalysis) : null;
+    if (llmSettings.enabled && !normalStrong && !productId && !localConsensus && !trustedReference) {
       if (llmVerdict?.confidence >= 0.7 && candidatePool[llmVerdict.index] && hasDirectCandidateEvidence(query, candidatePool[llmVerdict.index])) { itemUrl = candidatePool[llmVerdict.index].url; matchedTerm = `LLM：${llmVerdict.reason || candidatePool[llmVerdict.index].title}`; }
-      else { itemUrl = null; matchedTerm = null; uncertaintyReason = llmVerdict?.reason || 'LLM 未找到足够的直接匹配证据'; }
+      else { uncertaintyReason = llmVerdict?.reason || 'LLM 未找到足够的直接匹配证据'; }
     }
-    const searchEvidence = { originalTerms, terms, packageHints, packageCreatorHints: packageClues.creatorHints, relatedPackages: relatedBooth.map(item => item.name), localReferences: localReferences.map(item => item.name), localConsensus: localConsensus ? { count: localConsensus.items.length, itemUrl: localConsensus.url } : null, trustedReference: trustedReference ? { name: trustedReference.name, itemUrl: trustedReference.itemUrl } : null, creatorHints, productId: productId || null, llm: localConsensus || trustedReference ? null : (llmSettings.enabled ? (llmVerdict || { index: -1, confidence: 0, reason: '没有给出可确认选择' }) : null) };
+    const searchEvidence = { originalTerms, terms, packageHints, packageCreatorHints: packageClues.creatorHints, relatedPackages: relatedBooth.map(item => item.name), localReferences: localReferences.map(item => item.name), localConsensus: localConsensus ? { count: localConsensus.items.length, itemUrl: localConsensus.url } : null, trustedReference: trustedReference ? { name: trustedReference.name, itemUrl: trustedReference.itemUrl } : null, creatorHints, filenameAnalysis, productId: productId || null, llm: localConsensus || trustedReference ? null : (llmSettings.enabled ? (llmVerdict || { index: -1, confidence: 0, reason: normalStrong ? '普通检索已有强证据，未调用 LLM 重排' : '没有给出可确认选择' }) : null) };
     if (!itemUrl) { const result = { searchUrl: lastSearchUrl, candidates: candidatePool.slice(0, 12), matched: false, status: uncertaintyReason ? `LLM 不确定，已保留 ${candidatePool.length} 个候选供你确认：${uncertaintyReason}` : candidatePool.length ? `已找到 ${candidatePool.length} 个候选，但没有足够直接证据自动绑定；请从候选中确认。` : `没有找到 BOOTH 商品（已尝试 ${terms.length} 个检索词）`, searchEvidence }; await writeDebug('booth-search', { query, options: { useLlm: Boolean(options.useLlm), tag: options.tag || null }, result: { matched: false, candidateCount: result.candidates.length, evidence: searchEvidence } }); return result; }
     const itemResponse = await fetch(itemUrl, { headers });
     if (!itemResponse.ok) return { searchUrl: itemUrl, matched: false, status: `BOOTH 商品页无法访问（HTTP ${itemResponse.status}）`, searchEvidence };
