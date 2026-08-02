@@ -42,7 +42,7 @@ function classify(name) {
 function idFor(fullPath) { return crypto.createHash('sha1').update(fullPath).digest('hex').slice(0, 12); }
 function formatSize(bytes) { if (!bytes) return '—'; const units = ['B', 'KB', 'MB', 'GB']; let i = 0; while (bytes >= 1024 && i < 3) { bytes /= 1024; i++; } return `${bytes.toFixed(i ? 1 : 0)} ${units[i]}`; }
 function displayName(name) { return name.replace(/\.(zip|rar|7z|unitypackage|blend|fbx|obj|vrm|apk|psd|png|jpe?g|webp)$/i, ''); }
-const defaultLlmSettings = { enabled: false, endpoint: 'https://api.openai.com/v1', model: 'gpt-4.1-mini', apiKey: '', useVision: true };
+const defaultLlmSettings = { enabled: false, endpoint: 'https://api.openai.com/v1', model: 'gpt-4.1-mini', apiKey: '', useVision: true, deepEndpoint: '', deepModel: '', deepApiKey: '' };
 function appDataDirectory() {
   // electron-builder 的 portable 启动器会提供此变量；安装版和开发环境则继续使用 Windows AppData。
   const portableDirectory = process.env.PORTABLE_EXECUTABLE_DIR;
@@ -54,6 +54,13 @@ function coverCachePath() { return path.join(appDataDirectory(), 'cache'); }
 async function loadSettings() { return { ...defaultLlmSettings, ...await fs.readFile(settingsPath(), 'utf8').then(JSON.parse).catch(() => ({})) }; }
 async function writeDebug(event, data = {}) { const dir = logsPath(); await fs.mkdir(dir, { recursive: true }); await fs.appendFile(path.join(dir, 'activity.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), event, ...data })}\n`, 'utf8'); }
 async function saveSettings(settings) { const safe = { ...defaultLlmSettings, ...settings }; await fs.mkdir(path.dirname(settingsPath()), { recursive: true }); await fs.writeFile(settingsPath(), JSON.stringify(safe, null, 2), 'utf8'); return safe; }
+function deepModelSettings(settings) {
+  const endpoint = String(settings.deepEndpoint || settings.endpoint || '').trim();
+  const model = String(settings.deepModel || '').trim();
+  const apiKey = String(settings.deepApiKey || settings.apiKey || '').trim();
+  if (!settings.enabled || !settings.useVision || !endpoint || !model || !apiKey) return null;
+  return { ...settings, endpoint, model, apiKey, enabled: true };
+}
 async function llmRerank(filename, candidates, settingsOverride = null, analysis = null, options = {}) {
   const settings = settingsOverride || await loadSettings();
   if (!settings.enabled || !settings.apiKey || !candidates.length) return null;
@@ -428,10 +435,11 @@ async function boothSearch(query, options = {}) {
     const llmQuery = options.tag ? `${query}（已知标签：${options.tag}）` : query;
     let llmVerdict = llmSettings.enabled && !normalStrong && !productId && !localConsensus && !trustedReference ? await llmRerank(llmQuery, candidatePool.slice(0, 8), llmSettings, filenameAnalysis) : null;
     let deepVisionUsed = false;
-    const needsVision = Boolean(options.deepSearch && llmSettings.useVision && llmVerdict && (llmVerdict.index < 0 || llmVerdict.confidence < 0.7) && candidatePool.slice(0, 4).some(candidate => candidate.image));
+    const deepSettings = deepModelSettings(llmSettings);
+    const needsVision = Boolean(options.deepSearch && deepSettings && llmVerdict && (llmVerdict.index < 0 || llmVerdict.confidence < 0.7) && candidatePool.slice(0, 4).some(candidate => candidate.image));
     if (needsVision) {
       deepVisionUsed = true;
-      llmVerdict = await llmRerank(llmQuery, candidatePool.slice(0, 4), llmSettings, filenameAnalysis, { useVision: true });
+      llmVerdict = await llmRerank(llmQuery, candidatePool.slice(0, 4), deepSettings, filenameAnalysis, { useVision: true });
     }
     if (llmSettings.enabled && !normalStrong && !productId && !localConsensus && !trustedReference) {
       if (llmVerdict?.confidence >= 0.7 && candidatePool[llmVerdict.index] && hasDirectCandidateEvidence(query, candidatePool[llmVerdict.index])) { itemUrl = candidatePool[llmVerdict.index].url; matchedTerm = `LLM：${llmVerdict.reason || candidatePool[llmVerdict.index].title}`; }
@@ -472,7 +480,8 @@ function createWindow() {
   window.loadFile('index.html');
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  await fs.mkdir(appDataDirectory(), { recursive: true });
   ipcMain.handle('choose-root', async () => {
     const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
     return result.canceled ? null : result.filePaths[0];
