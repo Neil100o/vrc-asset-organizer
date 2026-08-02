@@ -257,29 +257,36 @@ async function listUnityPackagePaths(filePath) {
   } catch { return paths; }
   return paths;
 }
-function packageSearchHints(paths) {
+function packageSearchClues(paths) {
   const counts = new Map();
+  const creatorCounts = new Map();
   for (const pathname of paths) {
-    for (const rawPart of pathname.replace(/\\/g, '/').split('/')) {
+    const parts = pathname.replace(/\\/g, '/').split('/').filter(Boolean);
+    const assetsIndex = parts.findIndex(part => normalizeSearchText(part) === 'assets');
+    const meaningfulParts = parts.slice(assetsIndex >= 0 ? assetsIndex + 1 : 0);
+    for (const [partIndex, rawPart] of meaningfulParts.entries()) {
       const part = rawPart.replace(/\.[^.]+$/, '').replace(/^\d+[_ -]*/, '').trim();
       const normalized = normalizeSearchText(part);
       if (part.length < 4 || !normalized || PACKAGE_PATH_NOISE.has(normalized) || /^[-_\d]+$/.test(part) || /^[0-9a-f]{12,}$/i.test(part)) continue;
+      // Unity 资源通常是 Assets/<作者或工作室>/<商品目录>/…；首层只作消歧上下文，不能直接当商品名搜索。
+      if (partIndex === 0) { creatorCounts.set(part, (creatorCounts.get(part) || 0) + 1); continue; }
       counts.set(part, (counts.get(part) || 0) + 1);
     }
   }
-  return [...counts.entries()]
+  const rank = map => [...map.entries()]
     .map(([term, count]) => ({ term, score: count * 100 + Math.min(term.length, 32) + (/[a-z].*[a-z]/i.test(term) ? 35 : 0) }))
     .sort((left, right) => right.score - left.score || right.term.length - left.term.length)
     .slice(0, 4)
     .map(item => item.term);
+  return { terms: rank(counts), creatorHints: rank(creatorCounts).slice(0, 3) };
 }
 async function inspectPackageHints(filePath) {
-  if (!filePath || !EXTENSIONS.has(path.extname(filePath).toLowerCase())) return [];
+  if (!filePath || !EXTENSIONS.has(path.extname(filePath).toLowerCase())) return { terms: [], creatorHints: [] };
   try {
     const extension = path.extname(filePath).toLowerCase();
     const paths = extension === '.zip' ? await listZipPaths(filePath) : extension === '.unitypackage' ? await listUnityPackagePaths(filePath) : [];
-    return packageSearchHints(paths);
-  } catch { return []; }
+    return packageSearchClues(paths);
+  } catch { return { terms: [], creatorHints: [] }; }
 }
 async function scoreCandidateContents(filename, candidates, headers, creatorHints = []) {
   const tokens = contentTokens(filename);
@@ -342,7 +349,8 @@ async function scanFolder(root) {
 
 async function boothSearch(query, options = {}) {
   const originalTerms = searchTerms(query);
-  const packageHints = await inspectPackageHints(options.assetPath);
+  const packageClues = await inspectPackageHints(options.assetPath);
+  const packageHints = packageClues.terms;
   let terms = [...new Set([...originalTerms, ...packageHints.flatMap(searchTerms)])].slice(0, 10);
   let lastSearchUrl = boothSearchUrl(query);
   try {
@@ -363,7 +371,7 @@ async function boothSearch(query, options = {}) {
     let matchedTerm = productId ? `BOOTH #${productId}` : localConsensus ? `本地同族包共识（${localConsensus.items.length} 份）` : trustedReference ? `本地参考：${trustedReference.name}` : null;
     let uncertaintyReason = null;
     const candidatePool = [...relatedBooth.map(item => ({ url: item.itemUrl, title: item.title || item.name, image: null, score: 60, localRelatedName: item.name, matchTerms: ['本地同族包'] })), ...localReferences.map(item => ({ url: item.itemUrl, title: item.title || item.name, image: null, score: 400, localReferenceName: item.name, matchTerms: ['人工本地参考'] }))];
-    let creatorHints = [];
+    let creatorHints = [...packageClues.creatorHints];
     for (const [termIndex, term] of (itemUrl ? [] : terms).entries()) {
       const searchUrl = boothSearchUrl(term);
       lastSearchUrl = searchUrl;
@@ -380,7 +388,7 @@ async function boothSearch(query, options = {}) {
     }
     if (!itemUrl && !productId) {
       const llmAliases = llmSettings.enabled ? await llmSuggestSearchTerms(query, options.tag, llmSettings) : { terms: [], creatorHints: [] };
-      creatorHints = llmAliases.creatorHints;
+      creatorHints = [...new Set([...creatorHints, ...llmAliases.creatorHints])];
       const aliases = [...knownNameAliases(query), ...llmAliases.terms];
       const extraTerms = aliases.filter(alias => !terms.some(term => term.normalize('NFKC').toLowerCase() === alias.normalize('NFKC').toLowerCase()));
       terms.push(...extraTerms);
@@ -413,7 +421,7 @@ async function boothSearch(query, options = {}) {
       if (llmVerdict?.confidence >= 0.7 && candidatePool[llmVerdict.index] && hasDirectCandidateEvidence(query, candidatePool[llmVerdict.index])) { itemUrl = candidatePool[llmVerdict.index].url; matchedTerm = `LLM：${llmVerdict.reason || candidatePool[llmVerdict.index].title}`; }
       else { itemUrl = null; matchedTerm = null; uncertaintyReason = llmVerdict?.reason || 'LLM 未找到足够的直接匹配证据'; }
     }
-    const searchEvidence = { originalTerms, terms, packageHints, relatedPackages: relatedBooth.map(item => item.name), localReferences: localReferences.map(item => item.name), localConsensus: localConsensus ? { count: localConsensus.items.length, itemUrl: localConsensus.url } : null, trustedReference: trustedReference ? { name: trustedReference.name, itemUrl: trustedReference.itemUrl } : null, creatorHints, productId: productId || null, llm: localConsensus || trustedReference ? null : (llmSettings.enabled ? (llmVerdict || { index: -1, confidence: 0, reason: '没有给出可确认选择' }) : null) };
+    const searchEvidence = { originalTerms, terms, packageHints, packageCreatorHints: packageClues.creatorHints, relatedPackages: relatedBooth.map(item => item.name), localReferences: localReferences.map(item => item.name), localConsensus: localConsensus ? { count: localConsensus.items.length, itemUrl: localConsensus.url } : null, trustedReference: trustedReference ? { name: trustedReference.name, itemUrl: trustedReference.itemUrl } : null, creatorHints, productId: productId || null, llm: localConsensus || trustedReference ? null : (llmSettings.enabled ? (llmVerdict || { index: -1, confidence: 0, reason: '没有给出可确认选择' }) : null) };
     if (!itemUrl) { const result = { searchUrl: lastSearchUrl, candidates: candidatePool.slice(0, 12), matched: false, status: uncertaintyReason ? `LLM 不确定，已保留 ${candidatePool.length} 个候选供你确认：${uncertaintyReason}` : candidatePool.length ? `已找到 ${candidatePool.length} 个候选，但没有足够直接证据自动绑定；请从候选中确认。` : `没有找到 BOOTH 商品（已尝试 ${terms.length} 个检索词）`, searchEvidence }; await writeDebug('booth-search', { query, options: { useLlm: Boolean(options.useLlm), tag: options.tag || null }, result: { matched: false, candidateCount: result.candidates.length, evidence: searchEvidence } }); return result; }
     const itemResponse = await fetch(itemUrl, { headers });
     if (!itemResponse.ok) return { searchUrl: itemUrl, matched: false, status: `BOOTH 商品页无法访问（HTTP ${itemResponse.status}）`, searchEvidence };
