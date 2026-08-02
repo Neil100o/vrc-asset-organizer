@@ -248,6 +248,61 @@ async function listZipPaths(filePath) {
     return paths;
   } finally { await handle.close(); }
 }
+async function readZipReadmeTexts(filePath) {
+  const handle = await fs.open(filePath, 'r');
+  try {
+    const stat = await handle.stat();
+    const tailSize = Math.min(stat.size, 65557);
+    const tail = Buffer.alloc(tailSize);
+    await handle.read(tail, 0, tailSize, stat.size - tailSize);
+    let eocd = -1;
+    for (let index = tail.length - 22; index >= 0; index--) if (tail.readUInt32LE(index) === 0x06054b50) { eocd = index; break; }
+    if (eocd < 0) return [];
+    const directorySize = tail.readUInt32LE(eocd + 12);
+    const directoryOffset = tail.readUInt32LE(eocd + 16);
+    if (!directorySize || directorySize > 8 * 1024 * 1024) return [];
+    const directory = Buffer.alloc(directorySize);
+    await handle.read(directory, 0, directorySize, directoryOffset);
+    const texts = [];
+    for (let offset = 0; offset + 46 <= directory.length && texts.length < 3;) {
+      if (directory.readUInt32LE(offset) !== 0x02014b50) break;
+      const compression = directory.readUInt16LE(offset + 10);
+      const compressedSize = directory.readUInt32LE(offset + 20);
+      const uncompressedSize = directory.readUInt32LE(offset + 24);
+      const nameLength = directory.readUInt16LE(offset + 28);
+      const extraLength = directory.readUInt16LE(offset + 30);
+      const commentLength = directory.readUInt16LE(offset + 32);
+      const localOffset = directory.readUInt32LE(offset + 42);
+      const end = offset + 46 + nameLength;
+      if (end > directory.length) break;
+      const entryName = decodeArchiveName(directory.subarray(offset + 46, end));
+      offset = end + extraLength + commentLength;
+      if (!/(?:^|\/)(?:readme|info|description|説明)[^/]*\.(?:txt|md)$/i.test(entryName) || !compressedSize || uncompressedSize > 256 * 1024 || ![0, 8].includes(compression)) continue;
+      const localHeader = Buffer.alloc(30);
+      await handle.read(localHeader, 0, 30, localOffset);
+      if (localHeader.readUInt32LE(0) !== 0x04034b50) continue;
+      const localNameLength = localHeader.readUInt16LE(26);
+      const localExtraLength = localHeader.readUInt16LE(28);
+      const payload = Buffer.alloc(compressedSize);
+      await handle.read(payload, 0, compressedSize, localOffset + 30 + localNameLength + localExtraLength);
+      const content = compression === 8 ? zlib.inflateRawSync(payload) : payload;
+      texts.push(content.toString('utf8'));
+    }
+    return texts;
+  } catch { return []; }
+  finally { await handle.close(); }
+}
+function readmeSearchTerms(texts) {
+  const terms = [];
+  for (const text of texts) for (const line of String(text).split(/\r?\n/).map(value => value.trim()).filter(Boolean)) {
+    if (!/(?:商品|product|作品)/i.test(line) || line.length > 180) continue;
+    const title = line.match(/】\s*([^【]{3,90})/)?.[1]
+      ?.replace(/(?:です|である|になります|となります|。).*$/u, '')
+      .trim();
+    if (title && /[\p{L}]/u.test(title)) terms.push(title);
+  }
+  return [...new Set(terms)].slice(0, 3);
+}
 function tarSize(header) { return parseInt(header.subarray(124, 136).toString('ascii').replace(/\0/g, '').trim(), 8) || 0; }
 async function listUnityPackagePaths(filePath) {
   const paths = [];
@@ -286,8 +341,11 @@ function packageSearchClues(paths) {
       const part = rawPart.replace(/\.[^.]+$/, '').replace(/^\d+[_ -]*/, '').trim();
       const normalized = normalizeSearchText(part);
       if (part.length < 4 || !normalized || PACKAGE_PATH_NOISE.has(normalized) || /^[-_\d]+$/.test(part) || /^[0-9a-f]{12,}$/i.test(part)) continue;
+      // ZIP 根目录里常直接放置一个 UnityPackage，例如
+      // IRREGULARS_Knife003_Stingray_V1.0.unitypackage；它是商品线索而不是作者目录。
+      const embeddedPackage = /\.(?:unitypackage|zip|rar|7z)$/i.test(rawPart);
       // Unity 资源通常是 Assets/<作者或工作室>/<商品目录>/…；首层只作消歧上下文，不能直接当商品名搜索。
-      if (partIndex === 0) { creatorCounts.set(part, (creatorCounts.get(part) || 0) + 1); continue; }
+      if (partIndex === 0 && !embeddedPackage) { creatorCounts.set(part, (creatorCounts.get(part) || 0) + 1); continue; }
       counts.set(part, (counts.get(part) || 0) + 1);
     }
   }
@@ -296,31 +354,60 @@ function packageSearchClues(paths) {
     .sort((left, right) => right.score - left.score || right.term.length - left.term.length)
     .slice(0, 4)
     .map(item => item.term);
-  return { terms: rank(counts), creatorHints: rank(creatorCounts).slice(0, 3) };
+  const contentNames = [...new Set(paths.map(pathname => pathname.split(/[\\/]/).pop() || '')
+    .filter(name => /\.(?:unitypackage|zip)$/i.test(name))
+    .map(name => name.replace(/\.(?:unitypackage|zip)$/i, '').trim())
+    .filter(name => name.length >= 5))].slice(0, 8);
+  return { terms: rank(counts), creatorHints: rank(creatorCounts).slice(0, 3), contentNames };
 }
 async function inspectPackageHints(filePath) {
-  if (!filePath || !EXTENSIONS.has(path.extname(filePath).toLowerCase())) return { terms: [], creatorHints: [] };
+  if (!filePath || !EXTENSIONS.has(path.extname(filePath).toLowerCase())) return { terms: [], creatorHints: [], contentNames: [], readmeTerms: [] };
   try {
     const extension = path.extname(filePath).toLowerCase();
     const paths = extension === '.zip' ? await listZipPaths(filePath) : extension === '.unitypackage' ? await listUnityPackagePaths(filePath) : [];
-    return packageSearchClues(paths);
-  } catch { return { terms: [], creatorHints: [] }; }
+    const pathClues = packageSearchClues(paths);
+    const readmeTerms = extension === '.zip' ? readmeSearchTerms(await readZipReadmeTexts(filePath)) : [];
+    return { ...pathClues, readmeTerms, terms: [...new Set([...readmeTerms, ...pathClues.terms])].slice(0, 8) };
+  } catch { return { terms: [], creatorHints: [], contentNames: [], readmeTerms: [] }; }
 }
-async function scoreCandidateContents(filename, candidates, headers, creatorHints = []) {
+async function scoreCandidateContents(filename, candidates, headers, creatorHints = [], packageContentNames = []) {
   const tokens = contentTokens(filename);
-  if ((!tokens.length && !creatorHints.length) || !candidates.length) return candidates;
+  if ((!tokens.length && !creatorHints.length && !packageContentNames.length) || !candidates.length) return candidates;
   const enriched = await Promise.all(candidates.slice(0, 8).map(async candidate => {
     try {
       let text = itemTextCache.get(candidate.url);
       if (!text) { const response = await fetch(candidate.url, { headers }); if (!response.ok) return candidate; text = visibleItemText(await response.text()); itemTextCache.set(candidate.url, text); }
+      const normalizedText = normalizeSearchText(text);
       const matches = tokens.filter(token => text.includes(token));
       const creatorMatches = creatorHints.filter(hint => text.includes(hint.normalize('NFKC').toLowerCase()));
-      const contentScore = matches.reduce((score, token) => score + (/[0-9]/.test(token) || token.length >= 7 ? 130 : token.length >= 4 ? 70 : 25), 0);
-      return { ...candidate, contentMatches: matches, creatorMatches, contentScore, score: candidate.score + contentScore };
+      const packageContentMatches = packageContentNames.filter(name => normalizedText.includes(normalizeSearchText(name)));
+      const contentScore = matches.reduce((score, token) => score + (/[0-9]/.test(token) || token.length >= 7 ? 130 : token.length >= 4 ? 70 : 25), 0) + packageContentMatches.length * 1600;
+      return { ...candidate, contentMatches: matches, creatorMatches, packageContentMatches, contentScore, score: candidate.score + contentScore };
     } catch { return candidate; }
   }));
   const evidence = new Map(enriched.map(candidate => [candidate.url, candidate]));
   return candidates.map(candidate => evidence.get(candidate.url) || candidate);
+}
+async function mapWithConcurrency(items, limit, worker) {
+  const results = [];
+  let cursor = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await worker(items[index], index);
+    }
+  }));
+  return results;
+}
+async function preloadBoothSearchPages(terms, headers) {
+  const entries = await mapWithConcurrency(terms, 3, async term => {
+    const searchUrl = boothSearchUrl(term);
+    try {
+      const response = await fetch(searchUrl, { headers });
+      return [term, response.ok ? await response.text() : null];
+    } catch { return [term, null]; }
+  });
+  return new Map(entries);
 }
 
 async function scanFolder(root) {
@@ -350,7 +437,7 @@ async function scanFolder(root) {
       id: idFor(fullPath), name: displayName(entry.name), rawName: entry.name, fullPath, ext,
       kind: typeOf(entry.name, ext), category: containerCategory || record.category || classify(entry.name), size: formatSize(stat.size),
       modified: stat.mtime.toISOString().slice(0, 10), previewPath: IMAGE_EXTENSIONS.has(ext) ? fullPath : null,
-      isDirectory: entry.isDirectory(), booth: record.booth || null, links: record.links || [], llmHints: record.llmHints || {}, parentPath: record.parentPath || null, confirmed: Boolean(record.confirmed), useDefaultCover: Boolean(record.useDefaultCover), localReference: Boolean(record.localReference), rootPath: root, isOrganized: Boolean(containerCategory), isLegacy: LEGACY_CATEGORY_DIRS.includes(containerCategory)
+      isDirectory: entry.isDirectory(), booth: record.booth || null, links: record.links || [], llmHints: record.llmHints || {}, parentPath: record.parentPath || null, confirmed: Boolean(record.confirmed), useDefaultCover: Boolean(record.useDefaultCover), customPreviewPath: record.customPreviewPath || null, localReference: Boolean(record.localReference), rootPath: root, isOrganized: Boolean(containerCategory), isLegacy: LEGACY_CATEGORY_DIRS.includes(containerCategory)
     });
   };
   for (const entry of entries) {
@@ -369,7 +456,8 @@ async function boothSearch(query, options = {}) {
   const originalTerms = searchTerms(query);
   const packageClues = await inspectPackageHints(options.assetPath);
   const packageHints = packageClues.terms;
-  let terms = [...new Set([...originalTerms, ...packageHints.flatMap(searchTerms)])].slice(0, 10);
+  // Readme-derived titles are strongest, then other package paths, then the outer filename.
+  let terms = [...new Set([...(packageClues.readmeTerms || []).flatMap(searchTerms), ...packageHints.flatMap(searchTerms), ...originalTerms])].slice(0, 10);
   let lastSearchUrl = boothSearchUrl(query);
   try {
     const headers = { 'User-Agent': 'VRCAssetOrganizer/0.1 (+https://github.com/Neil100o/vrc-asset-organizer)' };
@@ -391,12 +479,13 @@ async function boothSearch(query, options = {}) {
     const candidatePool = [...relatedBooth.map(item => ({ url: item.itemUrl, title: item.title || item.name, image: null, score: 60, localRelatedName: item.name, matchTerms: ['本地同族包'] })), ...localReferences.map(item => ({ url: item.itemUrl, title: item.title || item.name, image: null, score: 400, localReferenceName: item.name, matchTerms: ['人工本地参考'] }))];
     let creatorHints = [...packageClues.creatorHints];
     let filenameAnalysis = null;
-    for (const [termIndex, term] of (itemUrl ? [] : terms).entries()) {
+    const initialSearchTerms = itemUrl ? [] : terms;
+    const initialPages = await preloadBoothSearchPages(initialSearchTerms, headers);
+    for (const [termIndex, term] of initialSearchTerms.entries()) {
       const searchUrl = boothSearchUrl(term);
       lastSearchUrl = searchUrl;
-      const response = await fetch(searchUrl, { headers });
-      if (!response.ok) continue;
-      const page = await response.text();
+      const page = initialPages.get(term);
+      if (!page) continue;
       const thumbnails = new Map([...page.matchAll(/data-original="([^"]+)"[^>]*href="(https:\/\/booth\.pm\/(?:ja\/)?items\/\d+)"/gi)].map(match => [match[2], match[1]]));
       let candidates = [...page.matchAll(/item-card__title[\s\S]{0,500}?href="(https:\/\/booth\.pm\/(?:ja\/)?items\/\d+)">([^<]+)</gi)]
         .map(match => ({ url: match[1], title: match[2].replace(/&amp;/g, '&'), image: thumbnails.get(match[1]) || null }));
@@ -415,12 +504,12 @@ async function boothSearch(query, options = {}) {
       const aliases = [...knownNameAliases(query), ...llmAliases.terms];
       const extraTerms = aliases.filter(alias => !terms.some(term => term.normalize('NFKC').toLowerCase() === alias.normalize('NFKC').toLowerCase()));
       terms.push(...extraTerms);
+      const aliasPages = await preloadBoothSearchPages(extraTerms, headers);
       for (const term of extraTerms) {
         const searchUrl = boothSearchUrl(term);
         lastSearchUrl = searchUrl;
-        const response = await fetch(searchUrl, { headers });
-        if (!response.ok) continue;
-        const page = await response.text();
+        const page = aliasPages.get(term);
+        if (!page) continue;
         const thumbnails = new Map([...page.matchAll(/data-original="([^"]+)"[^>]*href="(https:\/\/booth\.pm\/(?:ja\/)?items\/\d+)"/gi)].map(match => [match[2], match[1]]));
         let candidates = [...page.matchAll(/item-card__title[\s\S]{0,500}?href="(https:\/\/booth\.pm\/(?:ja\/)?items\/\d+)">([^<]+)</gi)]
           .map(match => ({ url: match[1], title: match[2].replace(/&amp;/g, '&'), image: thumbnails.get(match[1]) || null }));
@@ -430,14 +519,18 @@ async function boothSearch(query, options = {}) {
         for (const candidate of ranked) mergeSearchCandidate(candidatePool, candidate);
       }
     }
-    candidatePool.splice(0, candidatePool.length, ...await scoreCandidateContents(query, candidatePool, headers, creatorHints));
+    candidatePool.splice(0, candidatePool.length, ...await scoreCandidateContents(query, candidatePool, headers, creatorHints, packageClues.contentNames));
     candidatePool.sort((a, b) => b.score - a.score);
     const evidenceBest = candidatePool[0];
     const evidenceRunnerUp = candidatePool[1];
     const normalStrong = hasStrongNormalMatch(evidenceBest, evidenceRunnerUp);
-    const llmCanAudit = Boolean(llmSettings.enabled && !productId && !localConsensus && !trustedReference);
+    const hardPackageMatch = Boolean(evidenceBest?.packageContentMatches?.length);
+    const llmCanAudit = Boolean(llmSettings.enabled && !productId && !localConsensus && !trustedReference && !hardPackageMatch);
     // Smart/deep mode treats deterministic first place as provisional until audited.
-    if (!productId && normalStrong && !llmCanAudit) {
+    if (!productId && hardPackageMatch) {
+      itemUrl = evidenceBest.url;
+      matchedTerm = `包内 UnityPackage 内容物精确匹配：${evidenceBest.packageContentMatches.join(', ')}`;
+    } else if (!productId && normalStrong && !llmCanAudit) {
       itemUrl = evidenceBest.url;
       matchedTerm = evidenceBest.contentScore >= 120 ? `内容物匹配: ${evidenceBest.contentMatches.join(', ')}` : evidenceBest.matchTerms?.[0] || query;
     }
@@ -460,7 +553,7 @@ async function boothSearch(query, options = {}) {
       if (llmVerdict?.confidence >= 0.7 && candidatePool[llmVerdict.index] && hasDirectCandidateEvidence(query, candidatePool[llmVerdict.index])) { itemUrl = candidatePool[llmVerdict.index].url; matchedTerm = `LLM：${llmVerdict.reason || candidatePool[llmVerdict.index].title}`; }
       else { uncertaintyReason = llmVerdict?.reason || 'LLM 未找到足够的直接匹配证据'; }
     }
-    const searchEvidence = { originalTerms, terms, packageHints, packageCreatorHints: packageClues.creatorHints, relatedPackages: relatedBooth.map(item => item.name), localReferences: localReferences.map(item => item.name), localConsensus: localConsensus ? { count: localConsensus.items.length, itemUrl: localConsensus.url } : null, trustedReference: trustedReference ? { name: trustedReference.name, itemUrl: trustedReference.itemUrl } : null, creatorHints, filenameAnalysis, productId: productId || null, searchMode: options.deepSearch ? 'deep' : llmSettings.enabled ? 'smart' : 'normal', normalCandidateAudited: Boolean(llmCanAudit && normalStrong), deepVisionUsed, llm: localConsensus || trustedReference ? null : (llmSettings.enabled ? (llmVerdict || { index: -1, confidence: 0, reason: '没有给出可确认选择' }) : null) };
+    const searchEvidence = { originalTerms, terms, packageHints, packageContentNames: packageClues.contentNames, packageCreatorHints: packageClues.creatorHints, relatedPackages: relatedBooth.map(item => item.name), localReferences: localReferences.map(item => item.name), localConsensus: localConsensus ? { count: localConsensus.items.length, itemUrl: localConsensus.url } : null, trustedReference: trustedReference ? { name: trustedReference.name, itemUrl: trustedReference.itemUrl } : null, creatorHints, filenameAnalysis, productId: productId || null, searchMode: options.deepSearch ? 'deep' : llmSettings.enabled ? 'smart' : 'normal', normalCandidateAudited: Boolean(llmCanAudit && normalStrong), deepVisionUsed, llm: localConsensus || trustedReference ? null : (llmSettings.enabled ? (llmVerdict || { index: -1, confidence: 0, reason: '没有给出可确认选择' }) : null) };
     if (!itemUrl) { const result = { searchUrl: lastSearchUrl, candidates: candidatePool.slice(0, 12), matched: false, status: uncertaintyReason ? `LLM 不确定，已保留 ${candidatePool.length} 个候选供你确认：${uncertaintyReason}` : candidatePool.length ? `已找到 ${candidatePool.length} 个候选，但没有足够直接证据自动绑定；请从候选中确认。` : `没有找到 BOOTH 商品（已尝试 ${terms.length} 个检索词）`, searchEvidence }; await writeDebug('booth-search', { query, options: { useLlm: Boolean(options.useLlm), tag: options.tag || null }, result: { matched: false, candidateCount: result.candidates.length, evidence: searchEvidence } }); return result; }
     const itemResponse = await fetch(itemUrl, { headers });
     if (!itemResponse.ok) return { searchUrl: itemUrl, matched: false, status: `BOOTH 商品页无法访问（HTTP ${itemResponse.status}）`, searchEvidence };
@@ -491,7 +584,7 @@ async function boothSearch(query, options = {}) {
 }
 
 function createWindow() {
-  const window = new BrowserWindow({ width: 1280, height: 820, minWidth: 960, minHeight: 680, backgroundColor: '#f4f6f8', webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true } });
+  const window = new BrowserWindow({ width: 1280, height: 820, minWidth: 960, minHeight: 680, icon: path.join(__dirname, 'build', 'icon.ico'), backgroundColor: '#f4f6f8', webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true } });
   window.loadFile('index.html');
 }
 
@@ -507,9 +600,20 @@ app.whenReady().then(async () => {
   ipcMain.handle('save-llm-settings', async (_, settings) => saveSettings(settings));
   ipcMain.handle('test-llm', async () => llmRerank('AA_FlintlockPistol', [{ title: 'フリントロック式ピストル', image: null }, { title: 'Audio Trace', image: null }]));
   ipcMain.handle('open-local-path', async (_, localPath) => { await fs.mkdir(localPath, { recursive: true }); return shell.openPath(localPath); });
+  ipcMain.handle('choose-custom-preview', async (_, assetPath) => {
+    const result = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }] });
+    if (result.canceled || !result.filePaths[0]) return null;
+    const source = result.filePaths[0];
+    const extension = path.extname(source).toLowerCase() || '.png';
+    const targetDir = path.join(coverCachePath(), 'manual');
+    const target = path.join(targetDir, `${idFor(assetPath)}${extension}`);
+    await fs.mkdir(targetDir, { recursive: true });
+    if (path.resolve(source) !== path.resolve(target)) await fs.copyFile(source, target);
+    return target;
+  });
   ipcMain.handle('save-classifications', async (_, root, assets) => {
     const indexPath = path.join(root, '.vrc-asset-organizer.json');
-    const records = Object.fromEntries(assets.map(asset => [asset.fullPath, { category: asset.category, booth: asset.booth || null, links: asset.links || [], llmHints: asset.llmHints || {}, parentPath: asset.parentPath || null, confirmed: Boolean(asset.confirmed), useDefaultCover: Boolean(asset.useDefaultCover), localReference: Boolean(asset.localReference) }]));
+    const records = Object.fromEntries(assets.map(asset => [asset.fullPath, { category: asset.category, booth: asset.booth || null, links: asset.links || [], llmHints: asset.llmHints || {}, parentPath: asset.parentPath || null, confirmed: Boolean(asset.confirmed), useDefaultCover: Boolean(asset.useDefaultCover), customPreviewPath: asset.customPreviewPath || null, localReference: Boolean(asset.localReference) }]));
     await fs.writeFile(indexPath, JSON.stringify(records, null, 2), 'utf8');
     return true;
   });

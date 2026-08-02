@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('assetApi', {
   getLlmSettings: () => ipcRenderer.invoke('get-llm-settings'),
   saveLlmSettings: (settings) => ipcRenderer.invoke('save-llm-settings', settings),
   testLlm: () => ipcRenderer.invoke('test-llm'),
+  chooseCustomPreview: (assetPath) => ipcRenderer.invoke('choose-custom-preview', assetPath),
   openLocalPath: (localPath) => ipcRenderer.invoke('open-local-path', localPath),
   saveClassifications: (root, assets) => ipcRenderer.invoke('save-classifications', root, assets),
   moveAsset: (asset, category) => ipcRenderer.invoke('move-asset', asset, category),
