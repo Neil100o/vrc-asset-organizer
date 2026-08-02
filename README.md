@@ -45,6 +45,18 @@ LLM 是可选增强：在“检索”页面为单个素材开启，并在设置�
 
 手动确认候选后，可以自动加入本地参考库。参考库只会在开启 LLM 检索时参与判断，并且只接受严格的同商品名称证据，不会把“兼容同一模型”的素材当成同一个商品。
 
+### LLM 接入格式
+
+本工具使用 **OpenAI 兼容的 Chat Completions API**，不要求必须使用 OpenAI 官方服务；只要服务提供兼容接口即可。
+
+- 在设置中填写 API 基地址，例如 `https://api.openai.com/v1`；程序会请求 `POST /chat/completions`。
+- 鉴权格式为 `Authorization: Bearer <API Key>`。
+- 请求使用 `model`、`temperature`、`messages` 字段。智能检索发送文本；深度检索在需要时会按 `image_url` 格式发送最多 4 张 BOOTH 候选缩略图。
+- 模型应能以普通文本返回 JSON。程序会从回复中读取匹配结论；当前不要求支持 `response_format` 或 JSON Schema。
+- 低档文本模型与高档多模态模型可分别填写 API 地址、模型名和密钥；没有配置高档模型时，深度检索会回退为智能检索。
+
+调用 LLM 时，可能发送文件名、已选标签、包内可读的名称线索、BOOTH 候选标题/商品页文字，以及深度检索所需的候选缩略图。不会上传原始压缩包、UnityPackage 或手动选择的本地预览图。普通检索默认不调用 LLM，也不消耗 Token。
+
 ## 使用方式
 
 1. 启动后选择 VRC 素材根目录。
