@@ -54,13 +54,13 @@ function coverCachePath() { return path.join(appDataDirectory(), 'cache'); }
 async function loadSettings() { return { ...defaultLlmSettings, ...await fs.readFile(settingsPath(), 'utf8').then(JSON.parse).catch(() => ({})) }; }
 async function writeDebug(event, data = {}) { const dir = logsPath(); await fs.mkdir(dir, { recursive: true }); await fs.appendFile(path.join(dir, 'activity.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), event, ...data })}\n`, 'utf8'); }
 async function saveSettings(settings) { const safe = { ...defaultLlmSettings, ...settings }; await fs.mkdir(path.dirname(settingsPath()), { recursive: true }); await fs.writeFile(settingsPath(), JSON.stringify(safe, null, 2), 'utf8'); return safe; }
-async function llmRerank(filename, candidates, settingsOverride = null, analysis = null) {
+async function llmRerank(filename, candidates, settingsOverride = null, analysis = null, options = {}) {
   const settings = settingsOverride || await loadSettings();
   if (!settings.enabled || !settings.apiKey || !candidates.length) return null;
   const endpoint = `${settings.endpoint.replace(/\/$/, '')}/chat/completions`;
   const text = `你是谨慎的 VRChat BOOTH 素材匹配审核员。普通检索已经给出候选，你只能在候选中选择，或返回 -1 表示不确定。作者/店铺、兼容模型、同一大类都只能用于消歧，绝不能单独当作同商品证据；“兼容某模型”不代表素材就是该模型本体或同系列。只有文件商品主体与候选标题、商品内容物或封面可见标题存在直接证据时才可选择。若候选带“本地同族包”，仍须验证标题或内容物，不能盲从。\n文件名：${filename}\n文件名结构（仅作假设，可能错误）：${analysis ? JSON.stringify(analysis) : '未提供'}\n候选：${candidates.map((c, i) => `[${i}] ${c.title}${c.localRelatedName ? `；本地同族包：${c.localRelatedName}` : ''}${c.contentMatches?.length ? `；内容物命中：${c.contentMatches.join(', ')}` : ''}${c.creatorMatches?.length ? `；作者线索命中：${c.creatorMatches.join(', ')}` : ''}`).join('\n')}\n只返回 JSON：{"index":数字或-1,"confidence":0到1,"reason":"简短理由"}。`;
   const content = [{ type: 'text', text }];
-  if (settings.useVision) candidates.slice(0, 6).forEach((candidate, index) => { if (candidate.image) content.push({ type: 'text', text: `候选图 ${index}` }, { type: 'image_url', image_url: { url: candidate.image, detail: 'low' } }); });
+  if (settings.useVision && options.useVision) candidates.slice(0, 4).forEach((candidate, index) => { if (candidate.image) content.push({ type: 'text', text: `候选图 ${index}（仅作为标题/物体的辅助证据）` }, { type: 'image_url', image_url: { url: candidate.image, detail: 'low' } }); });
   try {
     const response = await fetch(endpoint, { method: 'POST', headers: { Authorization: `Bearer ${settings.apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ model: settings.model, temperature: 0, messages: [{ role: 'user', content }] }) });
     const body = await response.text();
@@ -360,7 +360,7 @@ async function boothSearch(query, options = {}) {
   try {
     const headers = { 'User-Agent': 'VRCAssetOrganizer/0.1 (+https://github.com/Neil100o/vrc-asset-organizer)' };
     const llmSettings = await loadSettings();
-    llmSettings.enabled = Boolean(options.useLlm && llmSettings.apiKey);
+    llmSettings.enabled = Boolean(options.useLlm && llmSettings.enabled && llmSettings.apiKey);
     const relatedBooth = llmSettings.enabled && Array.isArray(options.relatedBooth) ? options.relatedBooth.filter(item => item?.itemUrl && item?.name).slice(0, 3) : [];
     const passedReferences = llmSettings.enabled && Array.isArray(options.localReferences) ? options.localReferences.filter(item => item?.itemUrl && item?.name).slice(0, 3) : [];
     const localReferences = llmSettings.enabled ? [...new Map([...(await storedLocalReferences(options.rootPath, query)), ...passedReferences].map(item => [item.itemUrl, item])).values()].slice(0, 6) : [];
@@ -426,12 +426,18 @@ async function boothSearch(query, options = {}) {
       matchedTerm = evidenceBest.contentScore >= 120 ? `内容物匹配: ${evidenceBest.contentMatches.join(', ')}` : evidenceBest.matchTerms?.[0] || query;
     }
     const llmQuery = options.tag ? `${query}（已知标签：${options.tag}）` : query;
-    const llmVerdict = llmSettings.enabled && !normalStrong && !productId && !localConsensus && !trustedReference ? await llmRerank(llmQuery, candidatePool.slice(0, 8), llmSettings, filenameAnalysis) : null;
+    let llmVerdict = llmSettings.enabled && !normalStrong && !productId && !localConsensus && !trustedReference ? await llmRerank(llmQuery, candidatePool.slice(0, 8), llmSettings, filenameAnalysis) : null;
+    let deepVisionUsed = false;
+    const needsVision = Boolean(options.deepSearch && llmSettings.useVision && llmVerdict && (llmVerdict.index < 0 || llmVerdict.confidence < 0.7) && candidatePool.slice(0, 4).some(candidate => candidate.image));
+    if (needsVision) {
+      deepVisionUsed = true;
+      llmVerdict = await llmRerank(llmQuery, candidatePool.slice(0, 4), llmSettings, filenameAnalysis, { useVision: true });
+    }
     if (llmSettings.enabled && !normalStrong && !productId && !localConsensus && !trustedReference) {
       if (llmVerdict?.confidence >= 0.7 && candidatePool[llmVerdict.index] && hasDirectCandidateEvidence(query, candidatePool[llmVerdict.index])) { itemUrl = candidatePool[llmVerdict.index].url; matchedTerm = `LLM：${llmVerdict.reason || candidatePool[llmVerdict.index].title}`; }
       else { uncertaintyReason = llmVerdict?.reason || 'LLM 未找到足够的直接匹配证据'; }
     }
-    const searchEvidence = { originalTerms, terms, packageHints, packageCreatorHints: packageClues.creatorHints, relatedPackages: relatedBooth.map(item => item.name), localReferences: localReferences.map(item => item.name), localConsensus: localConsensus ? { count: localConsensus.items.length, itemUrl: localConsensus.url } : null, trustedReference: trustedReference ? { name: trustedReference.name, itemUrl: trustedReference.itemUrl } : null, creatorHints, filenameAnalysis, productId: productId || null, llm: localConsensus || trustedReference ? null : (llmSettings.enabled ? (llmVerdict || { index: -1, confidence: 0, reason: normalStrong ? '普通检索已有强证据，未调用 LLM 重排' : '没有给出可确认选择' }) : null) };
+    const searchEvidence = { originalTerms, terms, packageHints, packageCreatorHints: packageClues.creatorHints, relatedPackages: relatedBooth.map(item => item.name), localReferences: localReferences.map(item => item.name), localConsensus: localConsensus ? { count: localConsensus.items.length, itemUrl: localConsensus.url } : null, trustedReference: trustedReference ? { name: trustedReference.name, itemUrl: trustedReference.itemUrl } : null, creatorHints, filenameAnalysis, productId: productId || null, searchMode: options.deepSearch ? 'deep' : llmSettings.enabled ? 'smart' : 'normal', deepVisionUsed, llm: localConsensus || trustedReference ? null : (llmSettings.enabled ? (llmVerdict || { index: -1, confidence: 0, reason: normalStrong ? '普通检索已有强证据，未调用 LLM 重排' : '没有给出可确认选择' }) : null) };
     if (!itemUrl) { const result = { searchUrl: lastSearchUrl, candidates: candidatePool.slice(0, 12), matched: false, status: uncertaintyReason ? `LLM 不确定，已保留 ${candidatePool.length} 个候选供你确认：${uncertaintyReason}` : candidatePool.length ? `已找到 ${candidatePool.length} 个候选，但没有足够直接证据自动绑定；请从候选中确认。` : `没有找到 BOOTH 商品（已尝试 ${terms.length} 个检索词）`, searchEvidence }; await writeDebug('booth-search', { query, options: { useLlm: Boolean(options.useLlm), tag: options.tag || null }, result: { matched: false, candidateCount: result.candidates.length, evidence: searchEvidence } }); return result; }
     const itemResponse = await fetch(itemUrl, { headers });
     if (!itemResponse.ok) return { searchUrl: itemUrl, matched: false, status: `BOOTH 商品页无法访问（HTTP ${itemResponse.status}）`, searchEvidence };
