@@ -188,7 +188,8 @@ function knownNameAliases(query) {
   const normalized = query.normalize('NFKC').toLowerCase();
   return Object.entries(KNOWN_NAME_ALIASES).flatMap(([name, aliases]) => normalized.includes(name) ? aliases : []);
 }
-function boothSearchUrl(term) { return `https://booth.pm/ja/search/${encodeURIComponent(term)}?sort=new&tags%5B%5D=VRChat`; }
+// 不强制按“最新”排序：长期存在的模型本体会被大量新上架的适配素材挤出首屏。
+function boothSearchUrl(term) { return `https://booth.pm/ja/search/${encodeURIComponent(term)}?tags%5B%5D=VRChat`; }
 const itemTextCache = new Map();
 function contentTokens(filename) {
   const normalized = displayName(filename).normalize('NFKC').toLowerCase();
