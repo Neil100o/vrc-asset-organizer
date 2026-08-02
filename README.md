@@ -6,6 +6,8 @@
 
 [MIT 开源协议](LICENSE) · [v1.0.0 发布说明](RELEASE_NOTES_v1.0.0.md)
 
+首版安装包的校验值见 [SHA256SUMS-v1.0.0.txt](SHA256SUMS-v1.0.0.txt)。
+
 ## 适用文件
 
 目前只显示和管理这些素材包：

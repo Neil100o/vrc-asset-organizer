@@ -20,6 +20,16 @@
 
 Windows 可能会因未签名而显示 SmartScreen 提示；这是个人发布的 Electron 应用尚未购买代码签名证书所致。请只从本仓库的 Releases 下载，并在确认来源后选择继续运行。
 
+## 文件校验
+
+Release 中会附带 `SHA256SUMS-v1.0.0.txt`。下载后可在 PowerShell 中执行以下命令，并将输出与校验文件比对：
+
+```powershell
+Get-FileHash '.\VRC素材整理器 Setup 1.0.0.exe' -Algorithm SHA256
+```
+
+哈希校验可以确认下载文件没有在传输或镜像过程中被改动，但不能替代杀毒软件或 Windows 代码签名。
+
 ## 已知限制
 
 - BOOTH 的页面结构、网络环境和访问限制可能影响自动检索或封面下载。
