@@ -1,0 +1,7 @@
+node_modules/
+cache/
+runtime/
+electron-runtime.zip
+dist/
+*.log
+VRC素材分类导出.json

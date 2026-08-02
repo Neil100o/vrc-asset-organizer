@@ -1,0 +1,22 @@
+{
+  "name": "booth-asset-organizer",
+  "version": "1.0.0",
+  "description": "本地 BOOTH / VRChat 素材浏览与整理工具",
+  "main": "main.js",
+  "scripts": {
+    "start": "runtime\\electron.exe .",
+    "dist": "electron-builder --win nsis portable"
+  },
+  "build": {
+    "appId": "com.neil100o.vrcassetorganizer",
+    "productName": "VRC素材整理器",
+    "asar": true,
+    "files": ["**/*", "!cache/**", "!runtime/**", "!electron-runtime.zip", "!node_modules/**", "!.git/**"],
+    "win": { "target": ["nsis", "portable"] },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true }
+  },
+  "devDependencies": {
+    "electron": "^37.2.6",
+    "electron-builder": "^26.0.12"
+  }
+}
