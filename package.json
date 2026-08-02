@@ -1,6 +1,7 @@
 {
   "name": "booth-asset-organizer",
   "version": "1.0.0",
+  "license": "MIT",
   "description": "本地 BOOTH / VRChat 素材浏览与整理工具",
   "main": "main.js",
   "scripts": {
