@@ -103,6 +103,52 @@ function searchTerms(name) {
   const latin = core?.match(/[A-Za-z][A-Za-z0-9]*/)?.[0];
   return [...new Set([withoutVersion, joined, camelJoined, ...camelParts, core, latin].filter(term => term && term.length >= 2))];
 }
+const SEARCH_NOISE_TOKENS = new Set(['vrc', 'vrchat', 'unity', 'package', 'asset', '対応', 'model', 'avatar', 'addon', 'beta', 'alpha', 'version', 'ver']);
+function normalizeSearchText(value) { return String(value || '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ''); }
+function searchTokens(value) {
+  return [...new Set(String(value || '').normalize('NFKC').toLowerCase().match(/[\p{L}\p{N}]{2,}/gu) || [])]
+    .filter(token => !SEARCH_NOISE_TOKENS.has(token) && !/^v?\d+(?:[._-]\d+)*$/i.test(token));
+}
+function rankSearchCandidate(candidate, term, termIndex, termCount) {
+  const normalizedTerm = normalizeSearchText(term);
+  const normalizedTitle = normalizeSearchText(candidate.title);
+  const tokens = searchTokens(term);
+  const matchedTokens = tokens.filter(token => candidate.title.normalize('NFKC').toLowerCase().includes(token));
+  const tokenScore = matchedTokens.reduce((score, token) => score + (token.length >= 10 ? 180 : token.length >= 7 ? 110 : token.length >= 4 ? 55 : 20), 0);
+  const exact = normalizedTerm.length >= 4 && normalizedTitle === normalizedTerm;
+  const phraseMatch = normalizedTerm.length >= 5 && normalizedTitle.includes(normalizedTerm);
+  const reversePhraseMatch = normalizedTitle.length >= 5 && normalizedTerm.includes(normalizedTitle);
+  const allTokensMatch = tokens.length >= 2 && matchedTokens.length === tokens.length;
+  const seriesTokens = stableFamilyTokens(term);
+  const seriesMatches = seriesTokens.filter(token => normalizedTitle.includes(token));
+  const score = (exact ? 1400 : 0)
+    + (phraseMatch ? 720 : 0)
+    + (reversePhraseMatch ? 440 : 0)
+    + tokenScore
+    + (allTokensMatch ? 260 : 0)
+    + seriesMatches.reduce((sum, token) => sum + (token.length >= 10 ? 220 : 90), 0)
+    + Math.max(0, termCount - termIndex);
+  return { ...candidate, score, matchTerms: [term], matchedTokens, exactTitle: exact, directTitleMatch: exact || phraseMatch || (allTokensMatch && matchedTokens.some(token => token.length >= 5)) };
+}
+function mergeSearchCandidate(pool, candidate) {
+  const existing = pool.findIndex(item => item.url === candidate.url);
+  if (existing < 0) { pool.push(candidate); return; }
+  const previous = pool[existing];
+  const preferred = candidate.score > previous.score ? candidate : previous;
+  pool[existing] = {
+    ...preferred,
+    localRelatedName: previous.localRelatedName || candidate.localRelatedName,
+    localReferenceName: previous.localReferenceName || candidate.localReferenceName,
+    matchTerms: [...new Set([...(previous.matchTerms || []), ...(candidate.matchTerms || [])])],
+    matchedTokens: [...new Set([...(previous.matchedTokens || []), ...(candidate.matchedTokens || [])])]
+  };
+}
+function hasStrongNormalMatch(candidate, runnerUp = null) {
+  if (!candidate) return false;
+  if (Number(candidate.contentScore || 0) >= 120 || candidate.exactTitle) return true;
+  const margin = Number(candidate.score || 0) - Number(runnerUp?.score || 0);
+  return Boolean(candidate.directTitleMatch && candidate.score >= 720 && (margin >= 90 || !runnerUp));
+}
 function stableFamilyTokens(name) {
   return [...new Set((displayName(name).normalize('NFKC').toLowerCase().match(/[a-z][a-z0-9]{4,}/g) || []).filter(token => token.length >= 7 && !['interactive', 'avatar', 'package', 'system'].includes(token)))];
 }
@@ -242,17 +288,8 @@ async function boothSearch(query, options = {}) {
         .map(match => ({ url: match[1], title: match[2].replace(/&amp;/g, '&'), image: thumbnails.get(match[1]) || null }));
       const allowed = TAG_KEYWORDS[options.tag];
       if (allowed) candidates = candidates.filter(candidate => { const title = candidate.title.toLowerCase(); return allowed.some(keyword => title.includes(keyword.toLowerCase())); });
-      const queryTokens = term.normalize('NFKC').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(token => token.length >= 2 && !['vrc', 'vrchat', '対応'].includes(token));
-      const normalizedTerm = term.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
-      const ranked = candidates.map(candidate => {
-        const normalizedTitle = candidate.title.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
-        const tokenScore = queryTokens.filter(token => candidate.title.normalize('NFKC').toLowerCase().includes(token)).length;
-        const exactBonus = normalizedTitle === normalizedTerm ? 1000 : normalizedTitle.includes(normalizedTerm) ? 250 : 0;
-        return { ...candidate, score: exactBonus + tokenScore * 20 + (terms.length - termIndex), matchTerms: [term] };
-      }).sort((a, b) => b.score - a.score);
-      for (const candidate of ranked) { const existing = candidatePool.findIndex(item => item.url === candidate.url); if (existing < 0) candidatePool.push(candidate); else { const previous = candidatePool[existing]; candidatePool[existing] = { ...(candidate.score > previous.score ? candidate : previous), localRelatedName: previous.localRelatedName || candidate.localRelatedName, matchTerms: [...new Set([...(previous.matchTerms || []), ...(candidate.matchTerms || [])])] }; } }
-      const best = ranked[0];
-      if (best?.score > 0) { itemUrl = best.url; matchedTerm = term; if (!llmSettings.enabled) break; }
+      const ranked = candidates.map(candidate => rankSearchCandidate(candidate, term, termIndex, terms.length)).sort((a, b) => b.score - a.score);
+      for (const candidate of ranked) mergeSearchCandidate(candidatePool, candidate);
     }
     if (!itemUrl && !productId) {
       const llmAliases = llmSettings.enabled ? await llmSuggestSearchTerms(query, options.tag, llmSettings) : { terms: [], creatorHints: [] };
@@ -271,23 +308,18 @@ async function boothSearch(query, options = {}) {
           .map(match => ({ url: match[1], title: match[2].replace(/&amp;/g, '&'), image: thumbnails.get(match[1]) || null }));
         const allowed = TAG_KEYWORDS[options.tag];
         if (allowed) candidates = candidates.filter(candidate => { const title = candidate.title.toLowerCase(); return allowed.some(keyword => title.includes(keyword.toLowerCase())); });
-        const queryTokens = term.normalize('NFKC').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(token => token.length >= 2 && !['vrc', 'vrchat'].includes(token));
-        const normalizedTerm = term.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
-        const ranked = candidates.map(candidate => {
-          const normalizedTitle = candidate.title.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
-          const tokenScore = queryTokens.filter(token => candidate.title.normalize('NFKC').toLowerCase().includes(token)).length;
-          const exactBonus = normalizedTitle === normalizedTerm ? 1000 : normalizedTitle.includes(normalizedTerm) ? 250 : 0;
-          return { ...candidate, score: exactBonus + tokenScore * 20 + 1, matchTerms: [term] };
-        }).sort((a, b) => b.score - a.score);
-        for (const candidate of ranked) { const existing = candidatePool.findIndex(item => item.url === candidate.url); if (existing < 0) candidatePool.push(candidate); else { const previous = candidatePool[existing]; candidatePool[existing] = { ...(candidate.score > previous.score ? candidate : previous), localRelatedName: previous.localRelatedName || candidate.localRelatedName, matchTerms: [...new Set([...(previous.matchTerms || []), ...(candidate.matchTerms || [])])] }; } }
-        const best = ranked[0];
-        if (best?.score > 0) { itemUrl = best.url; matchedTerm = `LLM alias: ${term}`; }
+        const ranked = candidates.map(candidate => rankSearchCandidate(candidate, term, terms.indexOf(term), terms.length)).sort((a, b) => b.score - a.score);
+        for (const candidate of ranked) mergeSearchCandidate(candidatePool, candidate);
       }
     }
     candidatePool.splice(0, candidatePool.length, ...await scoreCandidateContents(query, candidatePool, headers, creatorHints));
     candidatePool.sort((a, b) => b.score - a.score);
     const evidenceBest = candidatePool[0];
-    if (!productId && evidenceBest?.contentScore >= 120) { itemUrl = evidenceBest.url; matchedTerm = `内容物匹配: ${evidenceBest.contentMatches.join(', ')}`; }
+    const evidenceRunnerUp = candidatePool[1];
+    if (!productId && hasStrongNormalMatch(evidenceBest, evidenceRunnerUp)) {
+      itemUrl = evidenceBest.url;
+      matchedTerm = evidenceBest.contentScore >= 120 ? `内容物匹配: ${evidenceBest.contentMatches.join(', ')}` : evidenceBest.matchTerms?.[0] || query;
+    }
     const llmQuery = options.tag ? `${query}（已知标签：${options.tag}）` : query;
     const llmVerdict = !productId && !localConsensus && !trustedReference ? await llmRerank(llmQuery, candidatePool.slice(0, 12), llmSettings) : null;
     if (llmSettings.enabled && !productId && !localConsensus && !trustedReference) {
@@ -295,7 +327,7 @@ async function boothSearch(query, options = {}) {
       else { itemUrl = null; matchedTerm = null; uncertaintyReason = llmVerdict?.reason || 'LLM 未找到足够的直接匹配证据'; }
     }
     const searchEvidence = { originalTerms, terms, relatedPackages: relatedBooth.map(item => item.name), localReferences: localReferences.map(item => item.name), localConsensus: localConsensus ? { count: localConsensus.items.length, itemUrl: localConsensus.url } : null, trustedReference: trustedReference ? { name: trustedReference.name, itemUrl: trustedReference.itemUrl } : null, creatorHints, productId: productId || null, llm: localConsensus || trustedReference ? null : (llmSettings.enabled ? (llmVerdict || { index: -1, confidence: 0, reason: '没有给出可确认选择' }) : null) };
-    if (!itemUrl) { const result = { searchUrl: lastSearchUrl, candidates: candidatePool.slice(0, 12), matched: false, status: uncertaintyReason ? `LLM 不确定，已保留 ${candidatePool.length} 个候选供你确认：${uncertaintyReason}` : `没有找到 BOOTH 商品（已尝试 ${terms.length} 个检索词）`, searchEvidence }; await writeDebug('booth-search', { query, options: { useLlm: Boolean(options.useLlm), tag: options.tag || null }, result: { matched: false, candidateCount: result.candidates.length, evidence: searchEvidence } }); return result; }
+    if (!itemUrl) { const result = { searchUrl: lastSearchUrl, candidates: candidatePool.slice(0, 12), matched: false, status: uncertaintyReason ? `LLM 不确定，已保留 ${candidatePool.length} 个候选供你确认：${uncertaintyReason}` : candidatePool.length ? `已找到 ${candidatePool.length} 个候选，但没有足够直接证据自动绑定；请从候选中确认。` : `没有找到 BOOTH 商品（已尝试 ${terms.length} 个检索词）`, searchEvidence }; await writeDebug('booth-search', { query, options: { useLlm: Boolean(options.useLlm), tag: options.tag || null }, result: { matched: false, candidateCount: result.candidates.length, evidence: searchEvidence } }); return result; }
     const itemResponse = await fetch(itemUrl, { headers });
     if (!itemResponse.ok) return { searchUrl: itemUrl, matched: false, status: `BOOTH 商品页无法访问（HTTP ${itemResponse.status}）`, searchEvidence };
     const itemHtml = await itemResponse.text();
