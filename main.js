@@ -41,8 +41,14 @@ function idFor(fullPath) { return crypto.createHash('sha1').update(fullPath).dig
 function formatSize(bytes) { if (!bytes) return '—'; const units = ['B', 'KB', 'MB', 'GB']; let i = 0; while (bytes >= 1024 && i < 3) { bytes /= 1024; i++; } return `${bytes.toFixed(i ? 1 : 0)} ${units[i]}`; }
 function displayName(name) { return name.replace(/\.(zip|rar|7z|unitypackage|blend|fbx|obj|vrm|apk|psd|png|jpe?g|webp)$/i, ''); }
 const defaultLlmSettings = { enabled: false, endpoint: 'https://api.openai.com/v1', model: 'gpt-4.1-mini', apiKey: '', useVision: true };
-function settingsPath() { return path.join(app.getPath('userData'), 'settings.json'); }
-function logsPath() { return path.join(app.getPath('userData'), 'logs'); }
+function appDataDirectory() {
+  // electron-builder 的 portable 启动器会提供此变量；安装版和开发环境则继续使用 Windows AppData。
+  const portableDirectory = process.env.PORTABLE_EXECUTABLE_DIR;
+  return portableDirectory ? path.join(portableDirectory, 'VRC素材整理器数据') : app.getPath('userData');
+}
+function settingsPath() { return path.join(appDataDirectory(), 'settings.json'); }
+function logsPath() { return path.join(appDataDirectory(), 'logs'); }
+function coverCachePath() { return path.join(appDataDirectory(), 'cache'); }
 async function loadSettings() { return { ...defaultLlmSettings, ...await fs.readFile(settingsPath(), 'utf8').then(JSON.parse).catch(() => ({})) }; }
 async function writeDebug(event, data = {}) { const dir = logsPath(); await fs.mkdir(dir, { recursive: true }); await fs.appendFile(path.join(dir, 'activity.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), event, ...data })}\n`, 'utf8'); }
 async function saveSettings(settings) { const safe = { ...defaultLlmSettings, ...settings }; await fs.mkdir(path.dirname(settingsPath()), { recursive: true }); await fs.writeFile(settingsPath(), JSON.stringify(safe, null, 2), 'utf8'); return safe; }
@@ -303,7 +309,7 @@ async function boothSearch(query, options = {}) {
         if (preview.ok) {
           const mime = preview.headers.get('content-type') || '';
           const extension = mime.includes('png') ? '.png' : mime.includes('webp') ? '.webp' : '.jpg';
-          const cacheDir = path.join(__dirname, 'cache');
+          const cacheDir = coverCachePath();
           await fs.mkdir(cacheDir, { recursive: true });
           cachedImagePath = path.join(cacheDir, `${idFor(`${matchedTerm}-${image}`)}${extension}`);
           await fs.writeFile(cachedImagePath, Buffer.from(await preview.arrayBuffer()));
