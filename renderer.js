@@ -38,15 +38,16 @@ function sameProductSignal(firstName,secondName){const first=familyTokens(firstN
 function relatedBoothCandidates(asset) { if(!familyTokens(asset.name).length) return []; return state.assets.filter(item=>item.id!==asset.id&&item.booth?.matched&&item.booth?.itemUrl&&sameProductSignal(asset.name,item.name)).slice(0,3).map(item=>({name:item.name,title:item.booth.title,itemUrl:item.booth.itemUrl})); }
 function localReferenceCandidates(asset) { if(!familyTokens(asset.name).length) return []; return state.assets.filter(item=>item.id!==asset.id&&item.localReference&&item.booth?.matched&&item.booth?.itemUrl&&sameProductSignal(asset.name,item.name)).slice(0,3).map(item=>({name:item.name,title:item.booth.title,itemUrl:item.booth.itemUrl})); }
 const nativeBoothSearch=window.assetApi.boothSearch.bind(window.assetApi);
-window.assetApi.boothSearch=(name,options={})=>state.selected?nativeBoothSearch(name,{...options,rootPath:state.root,relatedBooth:relatedBoothCandidates(state.selected),localReferences:localReferenceCandidates(state.selected)}):nativeBoothSearch(name,options);
+window.assetApi.boothSearch=(name,options={})=>state.selected?nativeBoothSearch(name,{...options,rootPath:state.root,assetPath:state.selected.fullPath,relatedBooth:relatedBoothCandidates(state.selected),localReferences:localReferenceCandidates(state.selected)}):nativeBoothSearch(name,options);
 function searchEvidenceMarkup(result) {
   const evidence=result.searchEvidence;
   if(!evidence) return '';
   const terms=(evidence.terms||[]).map(term=>`<code>${esc(term)}</code>`).join('') || '<em>无</em>';
+  const packageHints=(evidence.packageHints||[]).map(term=>`<code>${esc(term)}</code>`).join('');
   const related=(evidence.relatedPackages||[]).map(name=>`<li>${esc(name)}</li>`).join('');
   const llm=evidence.localConsensus ? `<li><b>本地同族包共识：</b>${evidence.localConsensus.count} 份已确认包指向同一 BOOTH 商品，已优先采用，LLM 不参与覆盖。</li>` : evidence.trustedReference ? `<li><b>人工本地参考：</b>已采用「${esc(evidence.trustedReference.name)}」确认过的 BOOTH 商品，LLM 不参与覆盖。</li>` : evidence.llm ? `<li><b>LLM 判别：</b>${evidence.llm.index >= 0 ? `候选 #${evidence.llm.index+1}` : '未确认任何候选'}；置信度 ${Math.round((Number(evidence.llm.confidence)||0)*100)}%${evidence.llm.reason?`；${esc(evidence.llm.reason)}`:''}</li>` : '<li><b>LLM 判别：</b>本次未启用</li>';
   const candidateEvidence=(result.candidates||[]).map((item,index)=>`<li><b>#${index+1} ${esc(item.title)}</b><span>总分 ${Math.round(item.score||0)}${item.matchTerms?.length?` · 检索词：${esc(item.matchTerms.join(' / '))}`:''}${item.matchedTokens?.length?` · 标题命中：${esc(item.matchedTokens.join(', '))}`:''}${item.contentMatches?.length?` · 内容物：${esc(item.contentMatches.join(', '))}`:''}${item.creatorMatches?.length?` · 作者线索：${esc(item.creatorMatches.join(', '))}`:''}${item.localRelatedName?` · 同族包：${esc(item.localRelatedName)}`:''}</span></li>`).join('');
-  return `<details class="search-evidence"><summary>查看检索证据与候选分数</summary><div class="evidence-body"><p><b>实际检索词</b>${terms}</p>${evidence.productId?`<p><b>BOOTH 编号</b><code>${esc(evidence.productId)}</code></p>`:''}${related?`<p><b>本地同族包</b></p><ul>${related}</ul>`:''}<ul>${llm}</ul>${candidateEvidence?`<p><b>候选证据</b></p><ol>${candidateEvidence}</ol>`:''}</div></details>`;
+  return `<details class="search-evidence"><summary>查看检索证据与候选分数</summary><div class="evidence-body"><p><b>实际检索词</b>${terms}</p>${packageHints?`<p><b>包内路径线索</b>${packageHints}</p>`:''}${evidence.productId?`<p><b>BOOTH 编号</b><code>${esc(evidence.productId)}</code></p>`:''}${related?`<p><b>本地同族包</b></p><ul>${related}</ul>`:''}<ul>${llm}</ul>${candidateEvidence?`<p><b>候选证据</b></p><ol>${candidateEvidence}</ol>`:''}</div></details>`;
 }
 function renderGrid() {
   const assets = visibleAssets(); $('#count').textContent = assets.length;
