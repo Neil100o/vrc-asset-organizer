@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const zlib = require('node:zlib');
 const wanakana = require('wanakana');
 const { autoUpdater } = require('electron-updater');
+const { parseBoothSearchCandidates } = require('./booth-parser');
 
 const DEFAULT_ROOT = 'G:\\vrc素材';
 const EXTENSIONS = new Set(['.zip', '.rar', '.7z', '.unitypackage']);
@@ -576,9 +577,7 @@ async function boothSearch(query, options = {}) {
       lastSearchUrl = searchUrl;
       const page = initialPages.get(term);
       if (!page) continue;
-      const thumbnails = new Map([...page.matchAll(/data-original="([^"]+)"[^>]*href="(https:\/\/booth\.pm\/(?:ja\/)?items\/\d+)"/gi)].map(match => [match[2], match[1]]));
-      let candidates = [...page.matchAll(/item-card__title[\s\S]{0,500}?href="(https:\/\/booth\.pm\/(?:ja\/)?items\/\d+)">([^<]+)</gi)]
-        .map(match => ({ url: match[1], title: match[2].replace(/&amp;/g, '&'), image: thumbnails.get(match[1]) || null }));
+      let candidates = parseBoothSearchCandidates(page);
       const allowed = TAG_KEYWORDS[options.tag];
       if (allowed) candidates = candidates.filter(candidate => { const title = candidate.title.toLowerCase(); return allowed.some(keyword => title.includes(keyword.toLowerCase())); });
       const ranked = candidates.map(candidate => rankSearchCandidate(candidate, term, termIndex, terms.length)).sort((a, b) => b.score - a.score);
@@ -600,9 +599,7 @@ async function boothSearch(query, options = {}) {
         lastSearchUrl = searchUrl;
         const page = aliasPages.get(term);
         if (!page) continue;
-        const thumbnails = new Map([...page.matchAll(/data-original="([^"]+)"[^>]*href="(https:\/\/booth\.pm\/(?:ja\/)?items\/\d+)"/gi)].map(match => [match[2], match[1]]));
-        let candidates = [...page.matchAll(/item-card__title[\s\S]{0,500}?href="(https:\/\/booth\.pm\/(?:ja\/)?items\/\d+)">([^<]+)</gi)]
-          .map(match => ({ url: match[1], title: match[2].replace(/&amp;/g, '&'), image: thumbnails.get(match[1]) || null }));
+        let candidates = parseBoothSearchCandidates(page);
         const allowed = TAG_KEYWORDS[options.tag];
         if (allowed) candidates = candidates.filter(candidate => { const title = candidate.title.toLowerCase(); return allowed.some(keyword => title.includes(keyword.toLowerCase())); });
         const ranked = candidates.map(candidate => rankSearchCandidate(candidate, term, terms.indexOf(term), terms.length)).sort((a, b) => b.score - a.score);
