@@ -10,6 +10,7 @@
     </main>
     <footer class="status"><span>默认仅保存分类标签；移动原文件需单独确认</span><span id="scanStatus">READY</span></footer>
   </div>
+  <section class="search-progress" id="searchProgress" hidden role="status" aria-live="polite"><div><span id="searchProgressLabel">准备检索</span><b id="searchProgressValue">0 / 0</b></div><div class="search-progress-track"><i id="searchProgressBar"></i></div></section>
   <div class="drop-overlay" id="dropOverlay" aria-hidden="true"><div><b>拖放导入素材</b><span>支持 ZIP、RAR、7Z、Unity Package</span></div></div>
   <dialog id="moveDialog"><form method="dialog" class="move-dialog-form"><header><p class="eyebrow">OPTIONAL / MOVE ORIGINAL</p><h2>移动原文件到分类目录</h2></header><section class="move-notice" aria-label="移动说明"><span class="move-notice-mark" aria-hidden="true">!</span><p id="moveText"></p></section><p class="move-hint">默认分类只会保存标签。此处为可选操作：移动后原目录不保留副本。</p><div class="dialog-actions"><button type="button" id="cancelMove">取消</button><button type="button" id="confirmMove" class="primary">确认并移动</button></div></form></dialog>
   <dialog id="importDialog"><form method="dialog"><p class="eyebrow">IMPORT / DROP FILES</p><h2>导入拖放的素材？</h2><p id="importText"></p><div class="dialog-actions"><button type="button" id="cancelImport">取消</button><button type="button" id="copyImport">复制导入</button><button type="button" class="primary" id="moveImport">移动原文件导入</button></div></form></dialog>
