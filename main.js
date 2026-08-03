@@ -5,6 +5,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
 const wanakana = require('wanakana');
+const { autoUpdater } = require('electron-updater');
 
 const DEFAULT_ROOT = 'G:\\vrc素材';
 const EXTENSIONS = new Set(['.zip', '.rar', '.7z', '.unitypackage']);
@@ -22,6 +23,28 @@ const CATEGORIES = [
 ];
 const CATEGORY_DIRS = ['01_道具', '02_衣服', '03_头发', '04_妆容', '05_功能插件', '06_Avatar本体', '07_场景与地图', '08_贴图与材质', '09_ERP内容', '90_待确认', '91_非VRC内容'];
 const LEGACY_CATEGORY_DIRS = ['01_VRC地图素材', '02_Avatar素材', '03_通用3D模型与武器', '04_当前房屋工程', '05_创作工具与AI', '06_非VRC内容', '07_贴图PSD与参考', '99_重复文件候选'];
+let mainWindow = null;
+let updatesConfigured = false;
+const isPortableBuild = () => Boolean(process.env.PORTABLE_EXECUTABLE_DIR);
+function sendUpdateStatus(state, detail = {}) { mainWindow?.webContents.send('update-status', { state, ...detail }); }
+function updateUnavailableReason() {
+  if (!app.isPackaged) return '开发环境不会检查发布版更新。';
+  if (isPortableBuild()) return '便携版不支持自动更新，请在 GitHub Releases 手动下载新版。';
+  return '';
+}
+function configureAutoUpdates() {
+  if (updatesConfigured || updateUnavailableReason()) return;
+  updatesConfigured = true;
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.on('checking-for-update', () => sendUpdateStatus('checking'));
+  autoUpdater.on('update-available', info => sendUpdateStatus('available', { version: info.version }));
+  autoUpdater.on('update-not-available', info => sendUpdateStatus('not-available', { version: info.version }));
+  autoUpdater.on('download-progress', progress => sendUpdateStatus('downloading', { percent: Math.round(progress.percent || 0) }));
+  autoUpdater.on('update-downloaded', info => sendUpdateStatus('downloaded', { version: info.version }));
+  autoUpdater.on('error', error => sendUpdateStatus('error', { message: error.message }));
+  setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 3500);
+}
 
 function typeOf(name, ext) {
   const text = name.toLowerCase();
@@ -601,8 +624,9 @@ async function boothSearch(query, options = {}) {
 }
 
 function createWindow() {
-  const window = new BrowserWindow({ width: 1280, height: 820, minWidth: 960, minHeight: 680, icon: path.join(__dirname, 'build', 'icon.ico'), backgroundColor: '#f4f6f8', webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true } });
-  window.loadFile('index.html');
+  mainWindow = new BrowserWindow({ width: 1280, height: 820, minWidth: 960, minHeight: 680, icon: path.join(__dirname, 'build', 'icon.ico'), backgroundColor: '#f4f6f8', webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true } });
+  mainWindow.on('closed', () => { mainWindow = null; });
+  mainWindow.loadFile('index.html');
 }
 
 app.whenReady().then(async () => {
@@ -675,7 +699,26 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle('open-external', (_, url) => shell.openExternal(url));
   ipcMain.handle('show-in-folder', (_, filePath) => shell.showItemInFolder(filePath));
+  ipcMain.handle('check-for-updates', async () => {
+    const reason = updateUnavailableReason();
+    if (reason) return { state: 'unsupported', message: reason };
+    configureAutoUpdates();
+    try { await autoUpdater.checkForUpdates(); return { state: 'checking' }; }
+    catch (error) { return { state: 'error', message: error.message }; }
+  });
+  ipcMain.handle('download-update', async () => {
+    const reason = updateUnavailableReason();
+    if (reason) return { state: 'unsupported', message: reason };
+    try { await autoUpdater.downloadUpdate(); return { state: 'downloading' }; }
+    catch (error) { return { state: 'error', message: error.message }; }
+  });
+  ipcMain.handle('install-update', () => {
+    if (updateUnavailableReason()) return false;
+    autoUpdater.quitAndInstall(false, true);
+    return true;
+  });
   createWindow();
+  configureAutoUpdates();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

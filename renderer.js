@@ -1,4 +1,6 @@
 const state = { root: 'G:\\vrc素材', assets: [], selected: null, selectedIds: new Set(), selectionAnchorId: null, filter: 'all', query: '', pendingCategory: null, pendingFamilySource: null, pendingFamilyAssets: [], importedPaths: new Set() };
+let updateState = 'idle';
+let updateResetTimer = null;
 const $ = (selector) => document.querySelector(selector);
 let progressHideTimer = null;
 function setSearchProgress(done, total, label) { clearTimeout(progressHideTimer); $('#searchProgress').hidden=false; $('#searchProgressLabel').textContent=label; $('#searchProgressValue').textContent=`${done} / ${total}`; $('#searchProgressBar').style.width=`${total ? Math.round(done / total * 100) : 0}%`; }
@@ -108,6 +110,29 @@ function renderDossier() {
 }
 async function scan() { $('#scanStatus').textContent='SCANNING…'; state.assets=await window.assetApi.scan(state.root); state.selected=null; renderGrid(); $('#dossier').innerHTML='<div class="empty"><span>SELECT / 选择素材</span><p>从左侧档案中选取一项，检查 BOOTH 候选和分类标签。</p></div>'; $('#scanStatus').textContent=`READY / ${state.assets.length} ITEMS`; }
 $('#scan').addEventListener('click',scan); $('#chooseRoot').addEventListener('click',async()=>{ const folder=await window.assetApi.chooseRoot(); if(folder){state.root=folder;$('#rootName').textContent=folder;scan();} });
+function setUpdateUi(status = {}) {
+  const button = $('#checkUpdates');
+  if (!button) return;
+  updateState = status.state || 'idle';
+  clearTimeout(updateResetTimer);
+  const reset = () => { updateResetTimer = setTimeout(() => { if (updateState !== 'downloading' && updateState !== 'downloaded') { updateState='idle'; button.disabled=false; button.textContent='检查更新'; } }, 2800); };
+  if (updateState === 'checking') { button.disabled=true; button.textContent='正在检查…'; $('#scanStatus').textContent='UPDATE / 正在检查新版本'; return; }
+  if (updateState === 'available') { button.disabled=false; button.textContent=`下载 v${status.version || '新版'}`; $('#scanStatus').textContent=`UPDATE AVAILABLE / v${status.version || '新版'}，点击下载`; return; }
+  if (updateState === 'downloading') { button.disabled=true; button.textContent=`正在下载 ${status.percent || 0}%`; $('#scanStatus').textContent=`UPDATE / 正在下载 v${status.version || '新版'}：${status.percent || 0}%`; return; }
+  if (updateState === 'downloaded') { button.disabled=false; button.textContent='重启并安装'; $('#scanStatus').textContent=`UPDATE READY / v${status.version || '新版'} 已下载`; return; }
+  if (updateState === 'not-available') { button.disabled=false; button.textContent='已是最新版'; $('#scanStatus').textContent=`UPDATE / 已是最新版${status.version ? ` v${status.version}` : ''}`; reset(); return; }
+  if (updateState === 'unsupported') { button.disabled=false; button.textContent='检查更新'; $('#scanStatus').textContent=`UPDATE / ${status.message || '此版本请手动下载更新'}`; return; }
+  if (updateState === 'error') { button.disabled=false; button.textContent='检查更新'; $('#scanStatus').textContent=`UPDATE FAILED / ${status.message || '检查失败，请稍后重试'}`; return; }
+  button.disabled=false; button.textContent='检查更新';
+}
+$('#checkUpdates').addEventListener('click', async () => {
+  let result;
+  if (updateState === 'available') result = await window.assetApi.downloadUpdate();
+  else if (updateState === 'downloaded') { await window.assetApi.installUpdate(); return; }
+  else result = await window.assetApi.checkForUpdates();
+  if (result?.state && result.state !== 'checking') setUpdateUi(result);
+});
+window.assetApi.onUpdateStatus(setUpdateUi);
 function suggestedCategory(title=''){const text=title.toLowerCase();return text.includes('hair')||text.includes('髪')||text.includes('ヘア')?'03_头发':text.includes('makeup')||text.includes('メイク')||text.includes('化粧')?'04_妆容':text.includes('outfit')||text.includes('衣装')||text.includes('服装')?'02_衣服':text.includes('plugin')||text.includes('system')||text.includes('tool')||text.includes('ツール')||text.includes('ギミック')||text.includes('shader')?'05_功能插件':text.includes('avatar')||text.includes('アバター')?'06_Avatar本体':text.includes('world')||text.includes('ワールド')?'07_场景与地图':text.includes('texture')||text.includes('material')||text.includes('テクスチャ')?'08_贴图与材质':'01_道具';}
 async function mapWithConcurrency(items, limit, worker){const results=[];let cursor=0;await Promise.all(Array.from({length:Math.min(limit,items.length)},async()=>{while(cursor<items.length){const index=cursor++;results[index]=await worker(items[index],index);}}));return results;}
 $('#classifyAll').addEventListener('click', async () => { const targets = state.assets.filter(asset => !asset.booth?.matched && asset.category !== '91_非VRC内容'); if (!targets.length) { $('#scanStatus').textContent='没有需要基础检索的 VRC 素材'; return; } const button=$('#classifyAll');button.disabled=true;let confirmed=0;let pending=0;let failed=0;let completed=0;setSearchProgress(0,targets.length,'正在准备基础检索…');try{await mapWithConcurrency(targets,3,async(asset)=>{ $('#scanStatus').textContent=`基础检索 ${completed + 1}/${targets.length} / ${asset.rawName}`; setSearchProgress(completed,targets.length,`正在检索：${asset.rawName}`); try{asset.llmHints={...(asset.llmHints||{}),searchMode:'normal',useLlm:false,deepSearch:false};const result=await nativeBoothSearch(asset.name,{rootPath:state.root,assetPath:asset.fullPath,tag:asset.llmHints.tag||''});asset.booth=result;if(result.matched){asset.category=suggestedCategory(result.title);asset.confirmed=true;confirmed++;}else{pending++;} }catch(error){asset.booth={matched:false,status:`检索失败，等待手动确认：${error.message}`};failed++;}finally{completed++;setSearchProgress(completed,targets.length,completed===targets.length?'基础检索完成':`已完成：${asset.rawName}`);}renderGrid();});await window.assetApi.saveClassifications(state.root,state.assets);state.selected=null;await scan();$('#scanStatus').textContent=`基础检索完成 / 已确认标签 ${confirmed} · 待确认 ${pending} · 失败 ${failed} · 未移动文件`;hideSearchProgress(2600);}finally{button.disabled=false;}});

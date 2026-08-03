@@ -1,6 +1,6 @@
 {
   "name": "booth-asset-organizer",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "author": "Neil100o",
   "license": "MIT",
   "description": "本地 BOOTH / VRChat 素材浏览与整理工具",
@@ -31,13 +31,21 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Neil100o",
+        "repo": "vrc-asset-organizer"
+      }
+    ]
   },
   "devDependencies": {
     "electron": "^37.2.6",
     "electron-builder": "^26.0.12"
   },
   "dependencies": {
+    "electron-updater": "^6.8.9",
     "wanakana": "^5.3.1"
   }
 }

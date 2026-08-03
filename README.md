@@ -6,7 +6,7 @@
 
 [MIT 开源协议](LICENSE) · [v1.0.0 发布说明](RELEASE_NOTES_v1.0.0.md)
 
-首版安装包的校验值见 [SHA256SUMS-v1.0.0.txt](SHA256SUMS-v1.0.0.txt)。
+各发行版安装包的 SHA-256 校验值会随 GitHub Release 一并提供。
 
 ## 适用文件
 
@@ -93,6 +93,8 @@ npm run dist
 
 - `VRC素材整理器 Setup <版本号>.exe`：安装版。
 - `VRC素材整理器 <版本号>.exe`：便携版，可直接运行。
+
+安装版会在启动后检查 GitHub Releases：发现新版时可在顶栏下载，并在“重启并安装”后完成更新。便携版为了保持单文件可携带性不支持自动覆盖，请从 Releases 手动下载新版 EXE。
 
 ## 注意事项
 
