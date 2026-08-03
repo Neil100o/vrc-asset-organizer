@@ -147,7 +147,7 @@ $('#classifyAll').addEventListener('click', async () => {
       setSearchProgress(completed,targets.length,`正在检索：${asset.rawName}`);
       try {
         asset.llmHints={...(asset.llmHints||{}),searchMode:'normal',useLlm:false,deepSearch:false};
-        const result=await nativeBoothSearch(asset.name,{rootPath:state.root,assetPath:asset.fullPath,tag:asset.llmHints.tag||''});
+        const result=await nativeBoothSearch(asset.name,{rootPath:state.root,assetPath:asset.fullPath,tag:asset.llmHints.tag||'',background:true});
         asset.booth=result;
         if(result.matched){ asset.category=suggestedCategory(result.title); asset.confirmed=true; confirmed++; }
         else pending++;

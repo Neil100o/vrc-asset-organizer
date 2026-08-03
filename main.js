@@ -25,8 +25,12 @@ const CATEGORY_DIRS = ['01_道具', '02_衣服', '03_头发', '04_妆容', '05_�
 const LEGACY_CATEGORY_DIRS = ['01_VRC地图素材', '02_Avatar素材', '03_通用3D模型与武器', '04_当前房屋工程', '05_创作工具与AI', '06_非VRC内容', '07_贴图PSD与参考', '99_重复文件候选'];
 const BOOTH_REQUEST_TIMEOUT_MS = 15000;
 const BOOTH_MAX_CONCURRENT_REQUESTS = 3;
+const BOOTH_MAX_BACKGROUND_REQUESTS = 2;
 const BOOTH_REQUEST_GAP_MS = 120;
 let activeBoothRequests = 0;
+let activeBackgroundBoothRequests = 0;
+let nextBoothRequestAt = 0;
+let boothQueueTimer = null;
 const boothRequestQueue = [];
 let mainWindow = null;
 let updatesConfigured = false;
@@ -58,21 +62,33 @@ async function fetchWithTimeout(url, options = {}, timeout = BOOTH_REQUEST_TIMEO
   finally { clearTimeout(timer); }
 }
 function drainBoothRequestQueue() {
-  while (activeBoothRequests < BOOTH_MAX_CONCURRENT_REQUESTS && boothRequestQueue.length) {
-    const { run, resolve, reject } = boothRequestQueue.shift();
-    activeBoothRequests++;
-    Promise.resolve().then(run).then(resolve, reject).finally(async () => {
-      activeBoothRequests--;
-      await wait(BOOTH_REQUEST_GAP_MS);
-      drainBoothRequestQueue();
-    });
+  if (!boothRequestQueue.length || activeBoothRequests >= BOOTH_MAX_CONCURRENT_REQUESTS) return;
+  const interactiveIndex = boothRequestQueue.findIndex(entry => entry.priority === 'interactive');
+  const index = interactiveIndex >= 0 ? interactiveIndex : 0;
+  const entry = boothRequestQueue[index];
+  if (entry.priority === 'background' && activeBackgroundBoothRequests >= BOOTH_MAX_BACKGROUND_REQUESTS) return;
+  const delay = Math.max(0, nextBoothRequestAt - Date.now());
+  if (delay) {
+    if (!boothQueueTimer) boothQueueTimer = setTimeout(() => { boothQueueTimer = null; drainBoothRequestQueue(); }, delay);
+    return;
   }
+  boothRequestQueue.splice(index, 1);
+  activeBoothRequests++;
+  if (entry.priority === 'background') activeBackgroundBoothRequests++;
+  nextBoothRequestAt = Date.now() + BOOTH_REQUEST_GAP_MS;
+  Promise.resolve().then(entry.run).then(entry.resolve, entry.reject).finally(() => {
+    activeBoothRequests--;
+    if (entry.priority === 'background') activeBackgroundBoothRequests--;
+    drainBoothRequestQueue();
+  });
+  drainBoothRequestQueue();
 }
-function queuedBoothFetch(url, options = {}) {
+function queuedBoothFetch(url, options = {}, priority = 'interactive') {
   return new Promise((resolve, reject) => {
     boothRequestQueue.push({
       resolve,
       reject,
+      priority,
       run: () => fetchWithTimeout(url, options)
     });
     drainBoothRequestQueue();
@@ -440,13 +456,13 @@ async function inspectPackageHints(filePath) {
     return { ...pathClues, readmeTerms, terms: [...new Set([...readmeTerms, ...pathClues.terms])].slice(0, 8) };
   } catch { return { terms: [], creatorHints: [], contentNames: [], readmeTerms: [] }; }
 }
-async function scoreCandidateContents(filename, candidates, headers, creatorHints = [], packageContentNames = []) {
+async function scoreCandidateContents(filename, candidates, headers, creatorHints = [], packageContentNames = [], priority = 'interactive') {
   const tokens = contentTokens(filename);
   if ((!tokens.length && !creatorHints.length && !packageContentNames.length) || !candidates.length) return candidates;
   const enriched = await mapWithConcurrency(candidates.slice(0, 8), 2, async candidate => {
     try {
       let text = itemTextCache.get(candidate.url);
-      if (!text) { const response = await queuedBoothFetch(candidate.url, { headers }); if (!response.ok) return candidate; text = visibleItemText(await response.text()); itemTextCache.set(candidate.url, text); }
+      if (!text) { const response = await queuedBoothFetch(candidate.url, { headers }, priority); if (!response.ok) return candidate; text = visibleItemText(await response.text()); itemTextCache.set(candidate.url, text); }
       const normalizedText = normalizeSearchText(text);
       const matches = tokens.filter(token => text.includes(token));
       const creatorMatches = creatorHints.filter(hint => text.includes(hint.normalize('NFKC').toLowerCase()));
@@ -469,11 +485,11 @@ async function mapWithConcurrency(items, limit, worker) {
   }));
   return results;
 }
-async function preloadBoothSearchPages(terms, headers) {
+async function preloadBoothSearchPages(terms, headers, priority = 'interactive') {
   const entries = await mapWithConcurrency(terms, 3, async term => {
     const searchUrl = boothSearchUrl(term);
     try {
-      const response = await queuedBoothFetch(searchUrl, { headers });
+      const response = await queuedBoothFetch(searchUrl, { headers }, priority);
       return [term, response.ok ? await response.text() : null];
     } catch { return [term, null]; }
   });
@@ -533,6 +549,7 @@ async function boothSearch(query, options = {}) {
   let terms = [...new Set([...(packageClues.readmeTerms || []).flatMap(searchTerms), ...packageHints.flatMap(searchTerms), ...originalTerms])].slice(0, 10);
   let lastSearchUrl = boothSearchUrl(query);
   try {
+    const requestPriority = options.background ? 'background' : 'interactive';
     const headers = { 'User-Agent': 'VRCAssetOrganizer/0.1 (+https://github.com/Neil100o/vrc-asset-organizer)' };
     const llmSettings = await loadSettings();
     llmSettings.enabled = Boolean(options.useLlm && llmSettings.enabled && llmSettings.apiKey);
@@ -553,7 +570,7 @@ async function boothSearch(query, options = {}) {
     let creatorHints = [...packageClues.creatorHints];
     let filenameAnalysis = null;
     const initialSearchTerms = itemUrl ? [] : terms;
-    const initialPages = await preloadBoothSearchPages(initialSearchTerms, headers);
+    const initialPages = await preloadBoothSearchPages(initialSearchTerms, headers, requestPriority);
     for (const [termIndex, term] of initialSearchTerms.entries()) {
       const searchUrl = boothSearchUrl(term);
       lastSearchUrl = searchUrl;
@@ -577,7 +594,7 @@ async function boothSearch(query, options = {}) {
       const aliases = [...knownNameAliases(query), ...llmAliases.terms];
       const extraTerms = aliases.filter(alias => !terms.some(term => term.normalize('NFKC').toLowerCase() === alias.normalize('NFKC').toLowerCase()));
       terms.push(...extraTerms);
-      const aliasPages = await preloadBoothSearchPages(extraTerms, headers);
+      const aliasPages = await preloadBoothSearchPages(extraTerms, headers, requestPriority);
       for (const term of extraTerms) {
         const searchUrl = boothSearchUrl(term);
         lastSearchUrl = searchUrl;
@@ -592,7 +609,7 @@ async function boothSearch(query, options = {}) {
         for (const candidate of ranked) mergeSearchCandidate(candidatePool, candidate);
       }
     }
-    candidatePool.splice(0, candidatePool.length, ...await scoreCandidateContents(query, candidatePool, headers, creatorHints, packageClues.contentNames));
+    candidatePool.splice(0, candidatePool.length, ...await scoreCandidateContents(query, candidatePool, headers, creatorHints, packageClues.contentNames, requestPriority));
     candidatePool.sort((a, b) => b.score - a.score);
     const evidenceBest = candidatePool[0];
     const evidenceRunnerUp = candidatePool[1];
@@ -628,7 +645,7 @@ async function boothSearch(query, options = {}) {
     }
     const searchEvidence = { originalTerms, terms, packageHints, packageContentNames: packageClues.contentNames, packageCreatorHints: packageClues.creatorHints, relatedPackages: relatedBooth.map(item => item.name), localReferences: localReferences.map(item => item.name), localConsensus: localConsensus ? { count: localConsensus.items.length, itemUrl: localConsensus.url } : null, trustedReference: trustedReference ? { name: trustedReference.name, itemUrl: trustedReference.itemUrl } : null, creatorHints, filenameAnalysis, productId: productId || null, searchMode: options.deepSearch ? 'deep' : llmSettings.enabled ? 'smart' : 'normal', normalCandidateAudited: Boolean(llmCanAudit && normalStrong), deepVisionUsed, llm: localConsensus || trustedReference ? null : (llmSettings.enabled ? (llmVerdict || { index: -1, confidence: 0, reason: '没有给出可确认选择' }) : null) };
     if (!itemUrl) { const result = { searchUrl: lastSearchUrl, candidates: candidatePool.slice(0, 12), matched: false, status: uncertaintyReason ? `LLM 不确定，已保留 ${candidatePool.length} 个候选供你确认：${uncertaintyReason}` : candidatePool.length ? `已找到 ${candidatePool.length} 个候选，但没有足够直接证据自动绑定；请从候选中确认。` : `没有找到 BOOTH 商品（已尝试 ${terms.length} 个检索词）`, searchEvidence }; await writeDebug('booth-search', { query, options: { useLlm: Boolean(options.useLlm), tag: options.tag || null }, result: { matched: false, candidateCount: result.candidates.length, evidence: searchEvidence } }); return result; }
-    const itemResponse = await queuedBoothFetch(itemUrl, { headers });
+    const itemResponse = await queuedBoothFetch(itemUrl, { headers }, requestPriority);
     if (!itemResponse.ok) return { searchUrl: itemUrl, matched: false, status: `BOOTH 商品页无法访问（HTTP ${itemResponse.status}）`, searchEvidence };
     const itemHtml = await itemResponse.text();
     const meta = (key) => itemHtml.match(new RegExp(`<meta[^>]+(?:property|name)="${key}"[^>]+content="([^"]+)"`, 'i'))?.[1] || itemHtml.match(new RegExp(`<meta[^>]+content="([^"]+)"[^>]+(?:property|name)="${key}"`, 'i'))?.[1] || null;
