@@ -135,7 +135,49 @@ $('#checkUpdates').addEventListener('click', async () => {
 window.assetApi.onUpdateStatus(setUpdateUi);
 function suggestedCategory(title=''){const text=title.toLowerCase();return text.includes('hair')||text.includes('髪')||text.includes('ヘア')?'03_头发':text.includes('makeup')||text.includes('メイク')||text.includes('化粧')?'04_妆容':text.includes('outfit')||text.includes('衣装')||text.includes('服装')?'02_衣服':text.includes('plugin')||text.includes('system')||text.includes('tool')||text.includes('ツール')||text.includes('ギミック')||text.includes('shader')?'05_功能插件':text.includes('avatar')||text.includes('アバター')?'06_Avatar本体':text.includes('world')||text.includes('ワールド')?'07_场景与地图':text.includes('texture')||text.includes('material')||text.includes('テクスチャ')?'08_贴图与材质':'01_道具';}
 async function mapWithConcurrency(items, limit, worker){const results=[];let cursor=0;await Promise.all(Array.from({length:Math.min(limit,items.length)},async()=>{while(cursor<items.length){const index=cursor++;results[index]=await worker(items[index],index);}}));return results;}
-$('#classifyAll').addEventListener('click', async () => { const targets = state.assets.filter(asset => !asset.booth?.matched && asset.category !== '91_非VRC内容'); if (!targets.length) { $('#scanStatus').textContent='没有需要基础检索的 VRC 素材'; return; } const button=$('#classifyAll');button.disabled=true;let confirmed=0;let pending=0;let failed=0;let completed=0;setSearchProgress(0,targets.length,'正在准备基础检索…');try{await mapWithConcurrency(targets,3,async(asset)=>{ $('#scanStatus').textContent=`基础检索 ${completed + 1}/${targets.length} / ${asset.rawName}`; setSearchProgress(completed,targets.length,`正在检索：${asset.rawName}`); try{asset.llmHints={...(asset.llmHints||{}),searchMode:'normal',useLlm:false,deepSearch:false};const result=await nativeBoothSearch(asset.name,{rootPath:state.root,assetPath:asset.fullPath,tag:asset.llmHints.tag||''});asset.booth=result;if(result.matched){asset.category=suggestedCategory(result.title);asset.confirmed=true;confirmed++;}else{pending++;} }catch(error){asset.booth={matched:false,status:`检索失败，等待手动确认：${error.message}`};failed++;}finally{completed++;setSearchProgress(completed,targets.length,completed===targets.length?'基础检索完成':`已完成：${asset.rawName}`);}renderGrid();});await window.assetApi.saveClassifications(state.root,state.assets);state.selected=null;await scan();$('#scanStatus').textContent=`基础检索完成 / 已确认标签 ${confirmed} · 待确认 ${pending} · 失败 ${failed} · 未移动文件`;hideSearchProgress(2600);}finally{button.disabled=false;}});
+function withSearchTimeout(promise, timeout = 25000) {
+  let timer;
+  const timeoutPromise = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('单项 BOOTH 检索超时')), timeout); });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
+}
+$('#classifyAll').addEventListener('click', async () => {
+  const targets = state.assets.filter(asset => !asset.booth?.matched && asset.category !== '91_非VRC内容');
+  if (!targets.length) { $('#scanStatus').textContent='没有需要基础检索的 VRC 素材'; return; }
+  const button=$('#classifyAll'); button.disabled=true;
+  let confirmed=0; let pending=0; let failed=0; let completed=0;
+  setSearchProgress(0,targets.length,'正在准备基础检索…');
+  try {
+    await mapWithConcurrency(targets,3,async(asset)=>{
+      $('#scanStatus').textContent=`基础检索 ${completed + 1}/${targets.length} / ${asset.rawName}`;
+      setSearchProgress(completed,targets.length,`正在检索：${asset.rawName}`);
+      try {
+        asset.llmHints={...(asset.llmHints||{}),searchMode:'normal',useLlm:false,deepSearch:false};
+        const result=await withSearchTimeout(nativeBoothSearch(asset.name,{rootPath:state.root,assetPath:asset.fullPath,tag:asset.llmHints.tag||''}));
+        asset.booth=result;
+        if(result.matched){ asset.category=suggestedCategory(result.title); asset.confirmed=true; confirmed++; }
+        else pending++;
+      } catch(error) {
+        asset.booth={matched:false,status:`检索失败，等待手动确认：${error.message}`}; failed++;
+      } finally {
+        completed++;
+        setSearchProgress(completed,targets.length,completed===targets.length?'基础检索完成':`已完成：${asset.rawName}`);
+      }
+      renderGrid();
+    });
+    await window.assetApi.saveClassifications(state.root,state.assets);
+    state.selected=null;
+    await scan();
+    $('#scanStatus').textContent=`基础检索完成 / 已确认标签 ${confirmed} · 待确认 ${pending} · 失败 ${failed} · 未移动文件`;
+  } finally {
+    button.disabled=false;
+    if (completed === targets.length) {
+      setSearchProgress(completed,targets.length,'基础检索完成');
+      hideSearchProgress(2600);
+    } else {
+      hideSearchProgress(800);
+    }
+  }
+});
 document.querySelectorAll('.rail-btn').forEach(btn=>btn.addEventListener('click',()=>{document.querySelector('.rail-btn.active').classList.remove('active');btn.classList.add('active');state.filter=btn.dataset.filter;renderGrid();}));
 $('#filter').addEventListener('input',e=>{state.query=e.target.value;renderGrid();});
 let droppedPaths=[];let dragDepth=0;
