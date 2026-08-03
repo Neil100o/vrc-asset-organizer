@@ -23,6 +23,11 @@ const CATEGORIES = [
 ];
 const CATEGORY_DIRS = ['01_道具', '02_衣服', '03_头发', '04_妆容', '05_功能插件', '06_Avatar本体', '07_场景与地图', '08_贴图与材质', '09_ERP内容', '90_待确认', '91_非VRC内容'];
 const LEGACY_CATEGORY_DIRS = ['01_VRC地图素材', '02_Avatar素材', '03_通用3D模型与武器', '04_当前房屋工程', '05_创作工具与AI', '06_非VRC内容', '07_贴图PSD与参考', '99_重复文件候选'];
+const BOOTH_REQUEST_TIMEOUT_MS = 15000;
+const BOOTH_MAX_CONCURRENT_REQUESTS = 3;
+const BOOTH_REQUEST_GAP_MS = 120;
+let activeBoothRequests = 0;
+const boothRequestQueue = [];
 let mainWindow = null;
 let updatesConfigured = false;
 const isPortableBuild = () => Boolean(process.env.PORTABLE_EXECUTABLE_DIR);
@@ -44,6 +49,34 @@ function configureAutoUpdates() {
   autoUpdater.on('update-downloaded', info => sendUpdateStatus('downloaded', { version: info.version }));
   autoUpdater.on('error', error => sendUpdateStatus('error', { message: error.message }));
   setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 3500);
+}
+function wait(milliseconds) { return new Promise(resolve => setTimeout(resolve, milliseconds)); }
+async function fetchWithTimeout(url, options = {}, timeout = BOOTH_REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error('请求超时')), timeout);
+  try { return await fetch(url, { ...options, signal: controller.signal }); }
+  finally { clearTimeout(timer); }
+}
+function drainBoothRequestQueue() {
+  while (activeBoothRequests < BOOTH_MAX_CONCURRENT_REQUESTS && boothRequestQueue.length) {
+    const { run, resolve, reject } = boothRequestQueue.shift();
+    activeBoothRequests++;
+    Promise.resolve().then(run).then(resolve, reject).finally(async () => {
+      activeBoothRequests--;
+      await wait(BOOTH_REQUEST_GAP_MS);
+      drainBoothRequestQueue();
+    });
+  }
+}
+function queuedBoothFetch(url, options = {}) {
+  return new Promise((resolve, reject) => {
+    boothRequestQueue.push({
+      resolve,
+      reject,
+      run: () => fetchWithTimeout(url, options)
+    });
+    drainBoothRequestQueue();
+  });
 }
 
 function typeOf(name, ext) {
@@ -410,10 +443,10 @@ async function inspectPackageHints(filePath) {
 async function scoreCandidateContents(filename, candidates, headers, creatorHints = [], packageContentNames = []) {
   const tokens = contentTokens(filename);
   if ((!tokens.length && !creatorHints.length && !packageContentNames.length) || !candidates.length) return candidates;
-  const enriched = await Promise.all(candidates.slice(0, 8).map(async candidate => {
+  const enriched = await mapWithConcurrency(candidates.slice(0, 8), 2, async candidate => {
     try {
       let text = itemTextCache.get(candidate.url);
-      if (!text) { const response = await fetch(candidate.url, { headers }); if (!response.ok) return candidate; text = visibleItemText(await response.text()); itemTextCache.set(candidate.url, text); }
+      if (!text) { const response = await queuedBoothFetch(candidate.url, { headers }); if (!response.ok) return candidate; text = visibleItemText(await response.text()); itemTextCache.set(candidate.url, text); }
       const normalizedText = normalizeSearchText(text);
       const matches = tokens.filter(token => text.includes(token));
       const creatorMatches = creatorHints.filter(hint => text.includes(hint.normalize('NFKC').toLowerCase()));
@@ -421,7 +454,7 @@ async function scoreCandidateContents(filename, candidates, headers, creatorHint
       const contentScore = matches.reduce((score, token) => score + (/[0-9]/.test(token) || token.length >= 7 ? 130 : token.length >= 4 ? 70 : 25), 0) + packageContentMatches.length * 1600;
       return { ...candidate, contentMatches: matches, creatorMatches, packageContentMatches, contentScore, score: candidate.score + contentScore };
     } catch { return candidate; }
-  }));
+  });
   const evidence = new Map(enriched.map(candidate => [candidate.url, candidate]));
   return candidates.map(candidate => evidence.get(candidate.url) || candidate);
 }
@@ -440,7 +473,7 @@ async function preloadBoothSearchPages(terms, headers) {
   const entries = await mapWithConcurrency(terms, 3, async term => {
     const searchUrl = boothSearchUrl(term);
     try {
-      const response = await fetch(searchUrl, { headers });
+      const response = await queuedBoothFetch(searchUrl, { headers });
       return [term, response.ok ? await response.text() : null];
     } catch { return [term, null]; }
   });
@@ -595,7 +628,7 @@ async function boothSearch(query, options = {}) {
     }
     const searchEvidence = { originalTerms, terms, packageHints, packageContentNames: packageClues.contentNames, packageCreatorHints: packageClues.creatorHints, relatedPackages: relatedBooth.map(item => item.name), localReferences: localReferences.map(item => item.name), localConsensus: localConsensus ? { count: localConsensus.items.length, itemUrl: localConsensus.url } : null, trustedReference: trustedReference ? { name: trustedReference.name, itemUrl: trustedReference.itemUrl } : null, creatorHints, filenameAnalysis, productId: productId || null, searchMode: options.deepSearch ? 'deep' : llmSettings.enabled ? 'smart' : 'normal', normalCandidateAudited: Boolean(llmCanAudit && normalStrong), deepVisionUsed, llm: localConsensus || trustedReference ? null : (llmSettings.enabled ? (llmVerdict || { index: -1, confidence: 0, reason: '没有给出可确认选择' }) : null) };
     if (!itemUrl) { const result = { searchUrl: lastSearchUrl, candidates: candidatePool.slice(0, 12), matched: false, status: uncertaintyReason ? `LLM 不确定，已保留 ${candidatePool.length} 个候选供你确认：${uncertaintyReason}` : candidatePool.length ? `已找到 ${candidatePool.length} 个候选，但没有足够直接证据自动绑定；请从候选中确认。` : `没有找到 BOOTH 商品（已尝试 ${terms.length} 个检索词）`, searchEvidence }; await writeDebug('booth-search', { query, options: { useLlm: Boolean(options.useLlm), tag: options.tag || null }, result: { matched: false, candidateCount: result.candidates.length, evidence: searchEvidence } }); return result; }
-    const itemResponse = await fetch(itemUrl, { headers });
+    const itemResponse = await queuedBoothFetch(itemUrl, { headers });
     if (!itemResponse.ok) return { searchUrl: itemUrl, matched: false, status: `BOOTH 商品页无法访问（HTTP ${itemResponse.status}）`, searchEvidence };
     const itemHtml = await itemResponse.text();
     const meta = (key) => itemHtml.match(new RegExp(`<meta[^>]+(?:property|name)="${key}"[^>]+content="([^"]+)"`, 'i'))?.[1] || itemHtml.match(new RegExp(`<meta[^>]+content="([^"]+)"[^>]+(?:property|name)="${key}"`, 'i'))?.[1] || null;
@@ -604,7 +637,7 @@ async function boothSearch(query, options = {}) {
     let cachedImagePath = null;
     if (image) {
       try {
-        const preview = await fetch(image, { headers });
+        const preview = await fetchWithTimeout(image, { headers });
         if (preview.ok) {
           const mime = preview.headers.get('content-type') || '';
           const extension = mime.includes('png') ? '.png' : mime.includes('webp') ? '.webp' : '.jpg';
