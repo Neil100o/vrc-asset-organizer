@@ -61,7 +61,7 @@ h2{font-size:22px;line-height:1.18;font-weight:800}
 .asset-meta{display:flex;justify-content:space-between;gap:7px;margin-top:8px;color:var(--muted);font:10px "IBM Plex Mono",Consolas,monospace}
 .tag{display:block;overflow:hidden;margin-top:8px;color:#8c3940;font:10px "IBM Plex Mono",Consolas,monospace;text-overflow:ellipsis;white-space:nowrap}
 
-.dossier{position:relative;align-self:start;overflow:auto;border-left:1px solid var(--line);padding:24px;background:var(--surface);color:var(--ink);box-shadow:-8px 0 20px rgb(24 33 43 / .025)}
+.dossier{position:sticky;top:0;align-self:start;max-height:100vh;height:100vh;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;border-left:1px solid var(--line);padding:24px;background:var(--surface);color:var(--ink);box-shadow:-8px 0 20px rgb(24 33 43 / .025)}
 .dossier::before{position:absolute;top:0;left:0;width:3px;height:64px;background:var(--signal);content:""}
 .dossier>*{position:relative;animation:panel-in .26s cubic-bezier(.22,.8,.2,1)}
 .empty{margin-top:28%;border:1px dashed var(--line-strong);border-radius:var(--radius);padding:20px;background:var(--surface-subtle)}
