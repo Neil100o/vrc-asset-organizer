@@ -4,6 +4,7 @@ const fsSync = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const zlib = require('node:zlib');
+const wanakana = require('wanakana');
 
 const DEFAULT_ROOT = 'G:\\vrc素材';
 const EXTENSIONS = new Set(['.zip', '.rar', '.7z', '.unitypackage']);
@@ -42,7 +43,7 @@ function classify(name) {
 function idFor(fullPath) { return crypto.createHash('sha1').update(fullPath).digest('hex').slice(0, 12); }
 function formatSize(bytes) { if (!bytes) return '—'; const units = ['B', 'KB', 'MB', 'GB']; let i = 0; while (bytes >= 1024 && i < 3) { bytes /= 1024; i++; } return `${bytes.toFixed(i ? 1 : 0)} ${units[i]}`; }
 function displayName(name) { return name.replace(/\.(zip|rar|7z|unitypackage|blend|fbx|obj|vrm|apk|psd|png|jpe?g|webp)$/i, ''); }
-const defaultLlmSettings = { enabled: false, endpoint: 'https://api.openai.com/v1', model: 'gpt-4.1-mini', apiKey: '', useVision: true, deepEndpoint: '', deepModel: '', deepApiKey: '' };
+const defaultLlmSettings = { enabled: false, endpoint: 'https://api.openai.com/v1', model: 'gpt-4.1-mini', apiKey: '', useVision: true, deepEndpoint: '', deepModel: '', deepApiKey: '', rootPath: DEFAULT_ROOT };
 function appDataDirectory() {
   // electron-builder 的 portable 启动器会提供此变量；安装版和开发环境则继续使用 Windows AppData。
   const portableDirectory = process.env.PORTABLE_EXECUTABLE_DIR;
@@ -53,7 +54,7 @@ function logsPath() { return path.join(appDataDirectory(), 'logs'); }
 function coverCachePath() { return path.join(appDataDirectory(), 'cache'); }
 async function loadSettings() { return { ...defaultLlmSettings, ...await fs.readFile(settingsPath(), 'utf8').then(JSON.parse).catch(() => ({})) }; }
 async function writeDebug(event, data = {}) { const dir = logsPath(); await fs.mkdir(dir, { recursive: true }); await fs.appendFile(path.join(dir, 'activity.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), event, ...data })}\n`, 'utf8'); }
-async function saveSettings(settings) { const safe = { ...defaultLlmSettings, ...settings }; await fs.mkdir(path.dirname(settingsPath()), { recursive: true }); await fs.writeFile(settingsPath(), JSON.stringify(safe, null, 2), 'utf8'); return safe; }
+async function saveSettings(settings) { const existing = await fs.readFile(settingsPath(), 'utf8').then(JSON.parse).catch(() => ({})); const safe = { ...defaultLlmSettings, ...existing, ...settings }; await fs.mkdir(path.dirname(settingsPath()), { recursive: true }); await fs.writeFile(settingsPath(), JSON.stringify(safe, null, 2), 'utf8'); return safe; }
 function deepModelSettings(settings) {
   const endpoint = String(settings.deepEndpoint || settings.endpoint || '').trim();
   const model = String(settings.deepModel || '').trim();
@@ -115,7 +116,20 @@ function searchTerms(name) {
   const camelParts = parts.map(part => part.replace(/([a-z])([A-Z])/g, '$1 $2')).filter(part => part.length >= 4);
   const core = withoutVersion.match(/[A-Za-z][A-Za-z0-9 _-]*[-ー][ァ-ヶー][ァ-ヶーA-Za-z0-9 _-]*/)?.[0]?.trim();
   const latin = core?.match(/[A-Za-z][A-Za-z0-9]*/)?.[0];
-  return [...new Set([withoutVersion, joined, camelJoined, ...camelParts, core, latin].filter(term => term && term.length >= 2))];
+  const baseTerms = [withoutVersion, joined, camelJoined, ...camelParts, core, latin].filter(term => term && term.length >= 2);
+  return [...new Set(baseTerms.flatMap(term => [term, ...kanaSearchVariants(term), ...romajiSearchVariants(term)]))];
+}
+const ROMAJI_SEARCH_NOISE = new Set(['avatar', 'asset', 'beta', 'dress', 'hair', 'item', 'model', 'package', 'plugin', 'system', 'tool', 'unity', 'vrc', 'vrchat', 'version']);
+function kanaSearchVariants(value) {
+  return [...new Set((String(value).match(/[A-Za-z]{3,}/g) || []).flatMap(token => {
+    const normalized = token.toLowerCase();
+    if (ROMAJI_SEARCH_NOISE.has(normalized)) return [];
+    const kana = wanakana.toKana(normalized, { passRomaji: true });
+    return wanakana.isKana(kana) && kana.length >= 2 ? [kana] : [];
+  }))];
+}
+function romajiSearchVariants(value) {
+  return [...new Set((String(value).match(/[ぁ-ゖァ-ヺー]{2,}/g) || []).map(token => wanakana.toRomaji(token).toLowerCase()).filter(token => token.length >= 3))];
 }
 const SEARCH_NOISE_TOKENS = new Set(['vrc', 'vrchat', 'unity', 'package', 'asset', '対応', 'model', 'avatar', 'addon', 'beta', 'alpha', 'version', 'ver']);
 function normalizeSearchText(value) { return String(value || '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ''); }
@@ -422,33 +436,36 @@ async function scanFolder(root) {
     }
   }
   if (clearedOverbroadReference) await fs.writeFile(indexPath, JSON.stringify(saved, null, 2), 'utf8');
-  const entries = await fs.readdir(root, { withFileTypes: true });
   const categoryNames = new Set(CATEGORY_DIRS);
+  const ignoredDirectories = new Set(['.git', 'node_modules', 'dist', 'runtime', 'cache', 'Booth素材整理器']);
   const assets = [];
-  const addAsset = async (entry, containerCategory = null) => {
-    if (entry.name === '.vrc-asset-organizer.json') return;
-    if (entry.isDirectory()) return;
-    const fullPath = path.join(root, containerCategory || '', entry.name);
-    const ext = entry.isFile() ? path.extname(entry.name).toLowerCase() : '';
-    if (entry.isFile() && !EXTENSIONS.has(ext)) return;
+  const addAsset = async (fullPath, entryName, containerCategory = null) => {
+    const ext = path.extname(entryName).toLowerCase();
+    if (!EXTENSIONS.has(ext)) return;
     const stat = await fs.stat(fullPath);
     const record = saved[fullPath] || {};
     assets.push({
-      id: idFor(fullPath), name: displayName(entry.name), rawName: entry.name, fullPath, ext,
-      kind: typeOf(entry.name, ext), category: containerCategory || record.category || classify(entry.name), size: formatSize(stat.size),
+      id: idFor(fullPath), name: displayName(entryName), rawName: entryName, fullPath, ext,
+      kind: typeOf(entryName, ext), category: record.category || containerCategory || classify(entryName), size: formatSize(stat.size),
       modified: stat.mtime.toISOString().slice(0, 10), previewPath: IMAGE_EXTENSIONS.has(ext) ? fullPath : null,
-      isDirectory: entry.isDirectory(), booth: record.booth || null, links: record.links || [], llmHints: record.llmHints || {}, parentPath: record.parentPath || null, confirmed: Boolean(record.confirmed), useDefaultCover: Boolean(record.useDefaultCover), customPreviewPath: record.customPreviewPath || null, localReference: Boolean(record.localReference), rootPath: root, isOrganized: Boolean(containerCategory), isLegacy: LEGACY_CATEGORY_DIRS.includes(containerCategory)
+      isDirectory: false, booth: record.booth || null, links: record.links || [], llmHints: record.llmHints || {}, parentPath: record.parentPath || null, confirmed: Boolean(record.confirmed), useDefaultCover: Boolean(record.useDefaultCover), customPreviewPath: record.customPreviewPath || null, localReference: Boolean(record.localReference), rootPath: root, isOrganized: Boolean(containerCategory), isLegacy: LEGACY_CATEGORY_DIRS.includes(containerCategory)
     });
   };
-  for (const entry of entries) {
-    if (entry.name === 'Booth素材整理器' || categoryNames.has(entry.name)) continue;
-    await addAsset(entry);
-  }
-  for (const category of CATEGORY_DIRS) {
-    const categoryPath = path.join(root, category);
-    const categoryEntries = await fs.readdir(categoryPath, { withFileTypes: true }).catch(() => []);
-    for (const entry of categoryEntries) await addAsset(entry, category);
-  }
+  const walk = async (directory, inheritedCategory = null) => {
+    const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (entry.name === '.vrc-asset-organizer.json') continue;
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (ignoredDirectories.has(entry.name)) continue;
+        const nextCategory = inheritedCategory || (categoryNames.has(entry.name) ? entry.name : null);
+        await walk(fullPath, nextCategory);
+      } else if (entry.isFile()) {
+        await addAsset(fullPath, entry.name, inheritedCategory);
+      }
+    }
+  };
+  await walk(root);
   return assets.sort((a, b) => b.modified.localeCompare(a.modified));
 }
 
@@ -592,7 +609,15 @@ app.whenReady().then(async () => {
   await fs.mkdir(appDataDirectory(), { recursive: true });
   ipcMain.handle('choose-root', async () => {
     const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
-    return result.canceled ? null : result.filePaths[0];
+    if (result.canceled || !result.filePaths[0]) return null;
+    const settings = await loadSettings();
+    await saveSettings({ ...settings, rootPath: result.filePaths[0] });
+    return result.filePaths[0];
+  });
+  ipcMain.handle('get-saved-root', async () => {
+    const rootPath = (await loadSettings()).rootPath || DEFAULT_ROOT;
+    const stat = await fs.stat(rootPath).catch(() => null);
+    return stat?.isDirectory() ? rootPath : DEFAULT_ROOT;
   });
   ipcMain.handle('scan', (_, root) => scanFolder(root || DEFAULT_ROOT));
   ipcMain.handle('booth-search', (_, name, options) => boothSearch(name, options || {}));

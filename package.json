@@ -14,12 +14,30 @@
     "productName": "VRC素材整理器",
     "icon": "build/icon.png",
     "asar": true,
-    "files": ["**/*", "!cache/**", "!runtime/**", "!electron-runtime.zip", "!node_modules/**", "!.git/**"],
-    "win": { "target": ["nsis", "portable"] },
-    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true }
+    "files": [
+      "**/*",
+      "!cache/**",
+      "!runtime/**",
+      "!electron-runtime.zip",
+      "!node_modules/**",
+      "!.git/**"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   },
   "devDependencies": {
     "electron": "^37.2.6",
     "electron-builder": "^26.0.12"
+  },
+  "dependencies": {
+    "wanakana": "^5.3.1"
   }
 }

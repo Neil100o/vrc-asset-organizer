@@ -2,6 +2,7 @@ const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('assetApi', {
   chooseRoot: () => ipcRenderer.invoke('choose-root'),
+  getSavedRoot: () => ipcRenderer.invoke('get-saved-root'),
   scan: (root) => ipcRenderer.invoke('scan', root),
   boothSearch: (name, options) => ipcRenderer.invoke('booth-search', name, options),
   getLlmSettings: () => ipcRenderer.invoke('get-llm-settings'),
